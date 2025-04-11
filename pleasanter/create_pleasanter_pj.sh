@@ -1,7 +1,8 @@
 #!/bin/bash
-# setup_pleasanter.sh
-# pleasanterDocker プロジェクトの作成から初期セットアップ＆起動までを全自動で行うスクリプト
-# ※公式マニュアル「Getting Started: Pleasanter Docker」に沿った内容です。
+# setup_pleasanter_with_nginx.sh
+# PleasanterDocker プロジェクトの作成から初期セットアップ＆起動までを全自動で行うスクリプト
+# 外部から http://ken2025/myhomesite でアクセスできるように、Nginx をリバースプロキシとして利用する
+# ※公式マニュアル「Getting Started: Pleasanter Docker」に沿った内容です
 
 set -e
 
@@ -65,7 +66,6 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: "Development"
       ASPNETCORE_PATHBASE: "/myhomesite"
-      # 接続文字列は、entrypoint で再生成するため環境変数での上書きは行いません
 
   codedefiner:
     build:
@@ -78,8 +78,25 @@ services:
         condition: service_healthy
     environment:
       ASPNETCORE_ENVIRONMENT: "Development"
+
+  nginx:
+    image: nginx:latest
+    container_name: nginx_proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - pleasanter
+
+networks:
+  default:
+    name: pleasanterDocker_default
+
 volumes:
   pg_data:
+    name: pleasanterDocker_pg_data
 EOF
 
 # -------------------------------
@@ -89,12 +106,35 @@ echo "サブフォルダーを作成します…"
 mkdir -p pleasanter codedefiner app_data_parameters
 
 # -------------------------------
-# pleasanter/entrypoint.sh の作成（設定ファイル再生成用）
+# nginx.conf の作成
+# -------------------------------
+echo "nginx.conf を作成します…"
+cat > nginx.conf << 'EOF'
+worker_processes 1;
+events { worker_connections 1024; }
+http {
+  server {
+    listen 80;
+    server_name ken2025;
+    
+    location /myhomesite/ {
+      proxy_pass http://pleasanter_app:8080/myhomesite/;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+  }
+}
+EOF
+
+# -------------------------------
+# pleasanter/entrypoint.sh の作成（Rds.json 再生成用）
 # -------------------------------
 echo "pleasanter/entrypoint.sh を作成します…"
 cat > pleasanter/entrypoint.sh << 'EOF'
 #!/bin/sh
-# Pleasanter コンテナ起動前に Rds.json を再生成して正しい接続文字列を設定する
+# Pleasanter コンテナ起動前に、Rds.json を再生成して正しい接続文字列を設定する
 
 RDS_FILE="App_Data/Parameters/Rds.json"
 
@@ -128,10 +168,9 @@ cat > pleasanter/Dockerfile << 'EOF'
 ARG VERSION=latest
 FROM implem/pleasanter:${VERSION}
 # プロジェクトルートにある app_data_parameters を、
-# Dockerfile のある pleasanter/ から見た相対パスでコピー
+# pleasanter/ から見た相対パスでコピー
 COPY ../app_data_parameters/ App_Data/Parameters/
-# entrypoint.sh は pleasanter/ フォルダー内にあるので、
-# この Dockerfile のビルドコンテキスト内の pleasanter/entrypoint.sh を指定
+# entrypoint.sh は pleasanter/ 配下にあるので、相対パスでコピー
 COPY pleasanter/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
@@ -144,7 +183,7 @@ echo "codedefiner/Dockerfile を作成します…"
 cat > codedefiner/Dockerfile << 'EOF'
 FROM implem/pleasanter:codedefiner
 # プロジェクトルートにある app_data_parameters を、
-# Dockerfile のある codedefiner/ から見た相対パスでコピー
+# codedefiner/ から見た相対パスでコピー
 COPY ../app_data_parameters/ /app/Implem.Pleasanter/App_Data/Parameters/
 ENTRYPOINT [ "dotnet", "Implem.CodeDefiner.dll" ]
 EOF
@@ -186,10 +225,10 @@ echo "CodeDefiner を実行してデータベース初期化を行います…"
 docker compose run --rm codedefiner _rds /l "ja" /z "Asia/Tokyo"
 
 # -------------------------------
-# Pleasanter コンテナの起動
+# 全サービスの起動
 # -------------------------------
-echo "Pleasanter コンテナをバックグラウンド起動します…"
-docker compose up -d pleasanter
+echo "全サービスをバックグラウンド起動します…"
+docker compose up -d
 
 echo "全自動セットアップが完了しました。"
 echo "ブラウザで http://ken2025/myhomesite にアクセスして、Pleasanter のログイン画面を確認してください。"

@@ -1,10 +1,3 @@
-#!/bin/sh
-# Pleasanter コンテナ起動前に、Rds.json を再生成して正しい接続文字列を設定する
-
-RDS_FILE="App_Data/Parameters/Rds.json"
-
-echo "Rds.json を再生成します…"
-cat > "$RDS_FILE" <<EOL
 {
   "Dbms": "PostgreSQL",
   "Provider": "Local",
@@ -18,7 +11,3 @@ cat > "$RDS_FILE" <<EOL
   "DisableIndexChangeDetection": true,
   "SysLogsSchemaVersion": 1
 }
-EOL
-
-echo "Rds.json の再生成が完了しました。"
-exec dotnet Implem.Pleasanter.dll
