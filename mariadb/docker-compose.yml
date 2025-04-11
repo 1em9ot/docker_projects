@@ -1,0 +1,12 @@
+version: '3.7'
+services:
+  mariadb:
+    image: mariadb:latest
+    container_name: mariadb
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: my-secret-pw
+    ports:
+      - "3306:3306"
+    volumes:
+      - /mnt/wsl/dockerdata/mariadb:/var/lib/mysql

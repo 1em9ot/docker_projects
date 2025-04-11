@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16
+    container_name: pleasanter_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "MyStrongPostgresPass!"
+      POSTGRES_DB: "postgres"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pleasanter:
+    build:
+      context: .
+      dockerfile: pleasanter/Dockerfile
+    container_name: pleasanter_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8881:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: "Development"
+      # 接続文字列は Rds.json の内容を利用するため、環境変数による上書きは行いません
+
+  codedefiner:
+    build:
+      context: .
+      dockerfile: codedefiner/Dockerfile
+    container_name: pleasanter_codedefiner
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: "Development"
+volumes:
+  pg_data:
