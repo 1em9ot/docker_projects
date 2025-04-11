@@ -28,7 +28,8 @@ services:
       - "8881:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: "Development"
-      # 接続文字列は Rds.json の内容を利用するため、環境変数による上書きは行いません
+      ASPNETCORE_PATHBASE: "/myhomesite"
+      # 接続文字列は、entrypoint で再生成するため環境変数での上書きは行いません
 
   codedefiner:
     build:

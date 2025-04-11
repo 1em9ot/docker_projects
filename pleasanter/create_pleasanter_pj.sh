@@ -1,6 +1,6 @@
 #!/bin/bash
 # setup_pleasanter.sh
-# PleasanterDocker プロジェクトの作成から初期セットアップ＆起動までを全自動で行うスクリプト
+# pleasanterDocker プロジェクトの作成から初期セットアップ＆起動までを全自動で行うスクリプト
 # ※公式マニュアル「Getting Started: Pleasanter Docker」に沿った内容です。
 
 set -e
@@ -8,7 +8,7 @@ set -e
 # -------------------------------
 # 変数設定
 # -------------------------------
-PROJECT_ROOT="PleasanterDocker"
+PROJECT_ROOT="pleasanterDocker"
 SERVICE_NAME="Implem.Pleasanter"  # ※ 必要に応じて変更してください
 POSTGRES_PASSWORD="MyStrongPostgresPass!"
 OWNER_PASSWORD="OwnerPass123!"
@@ -64,7 +64,8 @@ services:
       - "8881:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: "Development"
-      # 接続文字列は Rds.json の内容を利用するため、環境変数による上書きは行いません
+      ASPNETCORE_PATHBASE: "/myhomesite"
+      # 接続文字列は、entrypoint で再生成するため環境変数での上書きは行いません
 
   codedefiner:
     build:
@@ -88,7 +89,7 @@ echo "サブフォルダーを作成します…"
 mkdir -p pleasanter codedefiner app_data_parameters
 
 # -------------------------------
-# pleasanter/entrypoint.sh の作成
+# pleasanter/entrypoint.sh の作成（設定ファイル再生成用）
 # -------------------------------
 echo "pleasanter/entrypoint.sh を作成します…"
 cat > pleasanter/entrypoint.sh << 'EOF'
@@ -126,9 +127,11 @@ echo "pleasanter/Dockerfile を作成します…"
 cat > pleasanter/Dockerfile << 'EOF'
 ARG VERSION=latest
 FROM implem/pleasanter:${VERSION}
-# コピー元：プロジェクトルートにある app_data_parameters を、Dockerfile のある pleasanter/ から見た相対パスでコピー
+# プロジェクトルートにある app_data_parameters を、
+# Dockerfile のある pleasanter/ から見た相対パスでコピー
 COPY ../app_data_parameters/ App_Data/Parameters/
-# entrypoint.sh は pleasanter/ フォルダー内にあるので、ここでは "pleasanter/entrypoint.sh" を指定
+# entrypoint.sh は pleasanter/ フォルダー内にあるので、
+# この Dockerfile のビルドコンテキスト内の pleasanter/entrypoint.sh を指定
 COPY pleasanter/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
@@ -140,13 +143,14 @@ EOF
 echo "codedefiner/Dockerfile を作成します…"
 cat > codedefiner/Dockerfile << 'EOF'
 FROM implem/pleasanter:codedefiner
-# Dockerfile のある codedefiner/ から見た相対パスで、app_data_parameters をコピー
+# プロジェクトルートにある app_data_parameters を、
+# Dockerfile のある codedefiner/ から見た相対パスでコピー
 COPY ../app_data_parameters/ /app/Implem.Pleasanter/App_Data/Parameters/
 ENTRYPOINT [ "dotnet", "Implem.CodeDefiner.dll" ]
 EOF
 
 # -------------------------------
-# app_data_parameters/Rds.json の作成（接続文字列を固定値で記載）
+# app_data_parameters/Rds.json の作成（固定値で記載）
 # -------------------------------
 echo "app_data_parameters/Rds.json を作成します…"
 cat > app_data_parameters/Rds.json << 'EOF'
@@ -188,4 +192,4 @@ echo "Pleasanter コンテナをバックグラウンド起動します…"
 docker compose up -d pleasanter
 
 echo "全自動セットアップが完了しました。"
-echo "ブラウザで http://localhost:8881 にアクセスして、Pleasanter のログイン画面を確認してください。"
+echo "ブラウザで http://ken2025/myhomesite にアクセスして、Pleasanter のログイン画面を確認してください。"
