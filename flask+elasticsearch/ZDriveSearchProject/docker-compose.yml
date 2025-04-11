@@ -1,0 +1,28 @@
+services:
+  elasticsearch:
+    build: ./elasticsearch
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - bootstrap.memory_lock=true
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports:
+      - '9200:9200'
+  app:
+    build: ./app
+    container_name: flask_app
+    depends_on:
+      - elasticsearch
+    volumes:
+      - '/mnt/z:/mnt/zdrive:ro'
+    ports:
+      - '5000:5000'
+volumes:
+  esdata:
