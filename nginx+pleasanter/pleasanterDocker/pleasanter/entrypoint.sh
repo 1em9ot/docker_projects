@@ -3,7 +3,7 @@
 
 RDS_FILE="App_Data/Parameters/Rds.json"
 
-echo "Rds.json を再生成します…"
+echo "Rds.json を再生成します..."
 cat > "$RDS_FILE" <<EOL
 {
   "Dbms": "PostgreSQL",

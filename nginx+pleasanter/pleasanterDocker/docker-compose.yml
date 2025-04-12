@@ -28,7 +28,9 @@ services:
       - "8881:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: "Development"
-      ASPNETCORE_PATHBASE: "/myhomesite"
+      ASPNETCORE_PATHBASE: ""
+      # サブディレクトリ利用しないので UsePathBase は不要です。
+      # ※ アプリ側で必要なら Forwarded Headers の設定は行ってください。
 
   codedefiner:
     build:
@@ -41,17 +43,6 @@ services:
         condition: service_healthy
     environment:
       ASPNETCORE_ENVIRONMENT: "Development"
-
-  nginx:
-    image: nginx:latest
-    container_name: nginx_proxy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - pleasanter
 
 networks:
   default:

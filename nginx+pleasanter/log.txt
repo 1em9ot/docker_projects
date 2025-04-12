@@ -1,0 +1,111 @@
+============================
+1. コンテナ一覧の確認
+----------------------------
+nginx_proxy
+pleasanter_app
+pleasanter_postgres
+flask_app
+elasticsearch
+pleasanter_db
+mariadb
+
+============================
+2. Docker ネットワーク情報の確認
+----------------------------
+[
+    {
+        "Name": "pleasanterDocker_default",
+        "Id": "840237cbcdae5eb07381504258e9a7b7672253fa3a89cff5ee34cc9b672c4304",
+        "Created": "2025-04-12T12:27:32.353011563Z",
+        "Scope": "local",
+        "Driver": "bridge",
+        "EnableIPv4": true,
+        "EnableIPv6": false,
+        "IPAM": {
+            "Driver": "default",
+            "Options": null,
+            "Config": [
+                {
+                    "Subnet": "172.21.0.0/16",
+                    "Gateway": "172.21.0.1"
+                }
+            ]
+        },
+        "Internal": false,
+        "Attachable": false,
+        "Ingress": false,
+        "ConfigFrom": {
+            "Network": ""
+        },
+        "ConfigOnly": false,
+        "Containers": {
+            "41342b2bb93a79bf8eca6d99d23e674a4eb74a48afd1e30132037aa8b574bd34": {
+                "Name": "pleasanter_app",
+                "EndpointID": "237dbb10eb6ff3aba77db72275a48fc4dca7d6222282a089fcbff9807a93f5b4",
+                "MacAddress": "be:fd:7c:89:7b:0c",
+                "IPv4Address": "172.21.0.4/16",
+                "IPv6Address": ""
+            },
+            "9c85fefa3d4f598aed32cd86d904a037e7db716ab4bac6c05c4caa01b65d63e7": {
+                "Name": "pleasanter_postgres",
+                "EndpointID": "eccaf8a07e73739a6f61357730109d7457c79898d187d426b12c0c180c7bc1a7",
+                "MacAddress": "a6:15:e9:1b:4f:d8",
+                "IPv4Address": "172.21.0.2/16",
+                "IPv6Address": ""
+            }
+        },
+        "Options": {},
+        "Labels": {
+            "com.docker.compose.config-hash": "ada14619f02d620f0c88ddd76ba37963f347256ddecff64042abf3fcf7cf569d",
+            "com.docker.compose.network": "default",
+            "com.docker.compose.project": "pleasanterdocker",
+            "com.docker.compose.version": "2.33.1"
+        }
+    }
+]
+
+============================
+3. docker-compose.yml の内容確認
+----------------------------
+docker-compose.yml が見つかりません。
+
+============================
+4. nginx.conf の内容確認
+----------------------------
+nginx.conf が見つかりません。
+
+============================
+5. Nginx コンテナ内 /etc/nginx/html の内容確認
+----------------------------
+/etc/nginx/html の確認に失敗
+
+============================
+6. Nginx コンテナ内からの内部接続テスト
+----------------------------
+>> curl -v http://pleasanter:8080/myhomesite/
+内部 curl テスト /myhomesite/ でエラー
+
+>> curl -v http://pleasanter:8080/myhomesite/styles/plugins/normalize.css
+内部 curl テスト 静的ファイルでエラー
+
+============================
+7. ホストからのアクセステスト（curl）
+----------------------------
+>> ホスト: curl -v http://127.0.0.1:8080/myhomesite/  (注意: URL中の 'myhomesite' を実際のパスに合わせて修正)
+ホストからの curl /myhomesite/ でエラー
+
+>> ホスト: curl -v http://ken2025:8080/myhomesite/
+ホストからの curl /myhomesite/ (ken2025) でエラー
+
+>> ホスト: curl -v http://ken2025:8080/styles/plugins/normalize.css
+ホストからの curl 静的ファイルでエラー
+
+============================
+8. ホスト側の /etc/hosts の内容確認
+----------------------------
+以下に 'ken2025' のエントリーがあるか確認してください:
+127.0.1.1	KEN2025.	KEN2025
+
+============================
+情報収集完了。
+上記出力結果のうち、どの段階で期待する動作と異なるか、またエラーメッセージがあるか教えてください。
