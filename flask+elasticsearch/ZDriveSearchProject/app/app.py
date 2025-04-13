@@ -11,26 +11,24 @@ from flask import Flask, request, escape, render_template_string
 app = Flask(__name__)
 
 # =========================================
-# 環境変数や設定項目
+# 設定
 # =========================================
 ES_URL = os.environ.get("ES_URL", "http://elasticsearch:9200")
 INDEX_NAME = os.environ.get("INDEX_NAME", "files")
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "300"))
 
-# Windows 形式の "Z:" をホストの /mnt/z にマップするための環境変数
-FILE_MOUNT_POINT = os.environ.get("FILE_MOUNT_POINT", "/mnt/z")
+# ※ インデックス作成では /mnt/zdrive を走査しているので、
+# /open では変換時に /mnt/zdrive を利用する
+FILE_MOUNT_PREFIX = "/mnt/zdrive"
 
 # 対象とするテキストファイルの拡張子セット
-TEXT_EXTENSIONS = {
-    ".txt", ".md", ".log", ".csv", ".json", ".py", ".java",
-    ".c", ".cpp", ".html", ".htm", ".mhtml"
-}
+TEXT_EXTENSIONS = {".txt", ".md", ".log", ".csv", ".json", ".py",
+                   ".java", ".c", ".cpp", ".html", ".htm", ".mhtml"}
 
 # =========================================
 # Elasticsearch 関連
 # =========================================
 def ensure_elasticsearch_ready():
-    """Elasticsearch が利用可能になるまで待機する"""
     for _ in range(30):
         try:
             r = requests.get(ES_URL, timeout=3)
@@ -42,7 +40,6 @@ def ensure_elasticsearch_ready():
     return False
 
 def ensure_index():
-    """インデックス（INDEX_NAME）が存在しなければ作成し、マッピングを設定する"""
     r = requests.head(f"{ES_URL}/{INDEX_NAME}")
     if r.status_code != 200:
         mapping = {
@@ -62,11 +59,9 @@ def ensure_index():
             print(f"Failed to create index: {res.text}")
 
 def process_file(file_path, fname):
-    """個々のファイルを読み込み、内容などを返す。インデックス作成用。"""
     try:
         with open(file_path, "rb") as f:
             raw = f.read()
-        # テキストファイルのエンコーディング判定
         try:
             content = raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -77,14 +72,9 @@ def process_file(file_path, fname):
         size = os.path.getsize(file_path)
         mtime = os.path.getmtime(file_path)
         modified_iso = datetime.fromtimestamp(mtime).isoformat()
-
-        # /mnt/zdrive 以下のパス -> Windows 形式 "Z:\..." に変換
-        # file_path 例: "/mnt/zdrive/dir/file.txt"
-        # → "Z:\dir\file.txt"
-        #   ※ '/mnt/zdrive' の文字数は 10
-        #   ※ slash を backslash に
+        # ここでは、元のスキャンディレクトリ "/mnt/zdrive" を除いて、
+        # Windows 形式 "Z:\..." に変換（※逆変換用情報として）
         win_path = "Z:" + file_path[len("/mnt/zdrive"):].replace("/", "\\")
-
         doc = {
             "path": win_path,
             "filename": fname,
@@ -99,11 +89,9 @@ def process_file(file_path, fname):
         return None
 
 def index_files():
-    """/mnt/zdrive を走査し、テキストファイルを全て Elasticsearch に並列処理でインデックス化する"""
     files_indexed = []
     bulk_actions = []
 
-    # ファイル一覧を取得
     files_to_process = []
     for root, dirs, files in os.walk("/mnt/zdrive"):
         for fname in files:
@@ -113,7 +101,6 @@ def index_files():
             full_path = os.path.join(root, fname)
             files_to_process.append((full_path, fname))
 
-    # 並列でファイルの読み込み処理
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as executor:
         futures = [executor.submit(process_file, fp, name) for fp, name in files_to_process]
@@ -122,7 +109,6 @@ def index_files():
             if res is not None:
                 results.append(res)
 
-    # Bulk インデックス用のアクションを構築
     for win_path, doc in results:
         action = {"index": {"_index": INDEX_NAME, "_id": win_path}}
         bulk_actions.append(action)
@@ -132,14 +118,12 @@ def index_files():
     if not bulk_actions:
         return
 
-    # Elasticsearch へ一括送信
     bulk_body = "\n".join(json.dumps(item, ensure_ascii=False) for item in bulk_actions) + "\n"
     res = requests.post(f"{ES_URL}/_bulk", data=bulk_body.encode("utf-8"),
                         headers={"Content-Type": "application/x-ndjson"})
     if not res.ok:
         print(f"Bulk indexing error: {res.text}")
 
-    # スクロール検索を使って既存の不要ドキュメントを削除
     try:
         scroll_res = requests.post(f"{ES_URL}/{INDEX_NAME}/_search",
                                    params={"scroll": "1m", "size": 1000},
@@ -172,7 +156,6 @@ def index_files():
         print(f"Error during delete check: {e}")
 
 def periodic_index_task():
-    """定期的に index_files を実行するバックグラウンドタスク"""
     if not ensure_elasticsearch_ready():
         print("Elasticsearch not available, aborting indexing.")
         return
@@ -181,21 +164,37 @@ def periodic_index_task():
         index_files()
         time.sleep(SCAN_INTERVAL)
 
-# アプリ起動時にバックグラウンドでインデックス更新開始
 threading.Thread(target=periodic_index_task, daemon=True).start()
+
+# =========================================
+# ハイライト処理用関数
+# =========================================
+def highlight_line(line, query):
+    """
+    元の行のテキスト（そのまま）に対して、検索クエリに一致した部分のみを
+    HTMLエスケープした上で <span class="highlight"> で囲み、連結して返す。
+    """
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    parts = []
+    last = 0
+    for m in pattern.finditer(line):
+        # 非マッチ部分をエスケープして追加
+        parts.append(escape(line[last:m.start()]))
+        # マッチ部分はエスケープした上で span タグで囲む
+        parts.append(f'<span class="highlight">{escape(m.group(0))}</span>')
+        last = m.end()
+    parts.append(escape(line[last:]))
+    return "".join(parts)
 
 # =========================================
 # Flask ルーティング
 # =========================================
 @app.route("/", methods=["GET"])
 def search():
-    """
-    検索画面。クエリを受け取り、Elasticsearch の検索結果を表示。
-    Elasticsearch が生成するハイライトの <em>...</em> タグに対して、CSS で背景を黄色にしています。
-    """
     query = request.args.get("q", "").strip()
     html = [
         "<html><head><meta charset='UTF-8'><title>File Search</title>",
+        # Elasticsearch のハイライト結果（<em>タグ）に対して背景黄色を適用
         "<style> em { background-color: yellow; font-style: normal; } </style>",
         "</head><body>"
     ]
@@ -239,24 +238,19 @@ def search():
                         except Exception:
                             pass
 
-                    # リンク先を /open にし、target="_blank" で別タブを開く
-                    # q=クエリ を付けることで /open 側でハイライト用に利用できる
+                    # リンク先は /open エンドポイントへ。target="_blank" で新規タブ表示。
                     html.append("<li>")
                     html.append(
                         f"<strong><a href='/open?file={escape(path)}&q={escape(query)}' target='_blank'>"
-                        f"{escape(filename)}</a></strong> ( {size} bytes, {escape(modified)} )"
-                        f" - Score: {score}<br/>"
+                        f"{escape(filename)}</a></strong> ( {size} bytes, {escape(modified)} ) - Score: {score}<br/>"
                     )
                     html.append(f"<small>Path: {escape(path)}</small><br/>")
-
                     highlight = hit.get("highlight", {})
                     if highlight:
                         for field, snippets in highlight.items():
-                            html.append(f"<div style='margin-top:5px;'>"
-                                        f"<em>{escape(field)} のヒット個所 ({len(snippets)}) :</em>")
+                            html.append(f"<div style='margin-top:5px;'><em>{escape(field)} のヒット個所 ({len(snippets)}) :</em>")
                             html.append("<ul>")
                             for snippet in snippets:
-                                # snippet はすでに ES が <em>...</em> タグを入れてくれる
                                 html.append(f"<li>{snippet}</li>")
                             html.append("</ul></div>")
                     html.append("</li>")
@@ -272,7 +266,7 @@ def search():
 def open_file():
     """
     ファイルパスと任意の行番号、及びハイライト用の検索クエリ (q) を受け取り、
-    該当ファイルの内容を行番号付きで表示し、行全体や一致文字列を黄色で強調表示。
+    該当ファイルの内容を行番号付きで表示し、行内の検索文字列部分を黄色で強調表示します。
     """
     file_param = request.args.get("file", "")
     try:
@@ -283,13 +277,12 @@ def open_file():
     if not file_param:
         return "File parameter is missing.", 400
 
-    # --- Windowsパス -> Linuxパス変換 ---
-    # 例: "Z:\folder\file.html" -> "/mnt/z/folder/file.html"
-    # 全角コロン "：" をファイル名に含むケースにも対応し、一旦 replace でハイフンへ変換するなど。
+    # ここで、file_param (例:"Z:\ルドラ - Wikipedia (2025_3_4 12：28：21).html") を
+    # 元のスキャンで使用した形式 "/mnt/zdrive/..." に変換する
     if file_param.startswith("Z:"):
-        file_path = FILE_MOUNT_POINT + file_param[2:].replace("\\", "/")
+        file_path = "/mnt/zdrive" + file_param[2:].replace("\\", "/")
+        # 万一、全角コロンの問題などで存在しなければ再試行
         if not os.path.exists(file_path):
-            # 全角コロンをハイフンに置換して再試行
             alt_file_path = file_path.replace("：", "-")
             if os.path.exists(alt_file_path):
                 file_path = alt_file_path
@@ -298,14 +291,12 @@ def open_file():
     else:
         file_path = file_param
 
-    # --- ファイルの読み込み ---
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
     except Exception as e:
         return f"Error reading file: {escape(str(e))}", 500
 
-    # --- ファイル内容を行番号付きで表示し、さらに q パラメータがあれば該当文字列をハイライト ---
     html = f"""
     <html>
       <head>
@@ -330,32 +321,20 @@ def open_file():
         <pre>
     """
     for idx, line in enumerate(lines, start=1):
-        escaped_line = escape(line)
-        # 正規表現で検索文字列をハイライト
         if query_hl:
-            try:
-                pattern = re.compile(re.escape(query_hl), re.IGNORECASE)
-                display_line = pattern.sub(lambda m: f'<span class="highlight">{m.group(0)}</span>',
-                                           escaped_line)
-            except Exception:
-                display_line = escaped_line
+            # ハイライト用関数で一致部分を <span class="highlight"> で囲む
+            display_line = highlight_line(line, query_hl)
         else:
-            display_line = escaped_line
-
-        # 指定行はさらに強調
+            display_line = escape(line)
         if line_number and idx == line_number:
             html += f"<span class='line highlight'>{display_line}</span>"
         else:
             html += f"<span class='line'>{display_line}</span>"
-
     html += """
         </pre>
         <script>
-          // 最初の highlight クラスの要素へスクロール
           var firstHighlighted = document.querySelector('.highlight');
-          if (firstHighlighted) {
-            firstHighlighted.scrollIntoView();
-          }
+          if (firstHighlighted) { firstHighlighted.scrollIntoView(); }
         </script>
       </body>
     </html>
