@@ -97,7 +97,7 @@ def index_files():
     try:
         scroll_res = requests.post(f"{ES_URL}/{INDEX_NAME}/_search",
                                    params={"scroll": "1m", "size": 1000},
-                                   json={"_source": False, "query": {"match_all": {}}})
+                                   json={"_source": True, "query": {"match_all": {}}})
         if scroll_res.ok:
             data = scroll_res.json()
             scroll_id = data.get("_scroll_id")
@@ -140,10 +140,11 @@ threading.Thread(target=periodic_index_task, daemon=True).start()
 
 @app.route("/", methods=["GET"])
 def search():
+    """検索クエリを受け付け、Elasticsearch の検索結果を詳細に表示するエンドポイント"""
     query = request.args.get("q", "").strip()
     html = ["<html><head><meta charset='UTF-8'><title>File Search</title></head><body>"]
     html.append("<h1>File Search</h1>")
-    html.append("<form method='GET' action='/'><input type='text' name='q' value='{}'/>".format(request.args.get("q", "")))
+    html.append("<form method='GET' action='/'><input type='text' name='q' value='{}'/>".format(escape(query)))
     html.append("<input type='submit' value='Search'/></form><hr/>")
     if query:
         search_query = {
@@ -155,7 +156,8 @@ def search():
             },
             "highlight": {
                 "fields": {
-                    "content": {"fragment_size": 100, "number_of_fragments": 1}
+                    "content": {"fragment_size": 100, "number_of_fragments": 3},
+                    "filename": {"fragment_size": 50, "number_of_fragments": 1}
                 }
             }
         }
@@ -163,11 +165,13 @@ def search():
             res = requests.post(f"{ES_URL}/{INDEX_NAME}/_search", json=search_query)
             if res.ok:
                 data = res.json()
+                total_hits = data.get("hits", {}).get("total", {}).get("value", 0)
                 hits = data.get("hits", {}).get("hits", [])
-                html.append(f"<p>Found {len(hits)} result(s) for '<strong>{query}</strong>'.</p>")
+                html.append(f"<p>Found {total_hits} result(s) for '<strong>{escape(query)}</strong>'.</p>")
                 html.append("<ul>")
                 for hit in hits:
                     source = hit.get("_source", {})
+                    score = hit.get("_score", 0)
                     filename = source.get("filename", "")
                     size = source.get("size", "")
                     modified = source.get("modified", "")
@@ -175,25 +179,94 @@ def search():
                     if modified:
                         try:
                             modified = modified.split(".")[0].replace("T", " ")
-                        except:
+                        except Exception:
                             pass
-                    snippet = ""
+                    # ファイル名は /open エンドポイントへのリンクにして、必要に応じて行番号もパラメータとして渡せます
+                    html.append("<li>")
+                    html.append(f"<strong><a href='/open?file={escape(path)}'>{escape(filename)}</a></strong> ( {size} bytes, {escape(modified)} ) - Score: {score}<br/>")
+                    html.append(f"<small>Path: {escape(path)}</small><br/>")
                     highlight = hit.get("highlight", {})
                     if highlight:
-                        snippets = highlight.get("content", [])
-                        if snippets:
-                            snippet = snippets[0]
-                    html.append("<li><strong>{}</strong> ({} bytes, {})<br/>".format(filename, size, modified))
-                    if snippet:
-                        html.append("<div>... {} ...</div>".format(snippet))
-                    html.append("<small>Path: {}</small></li>".format(path))
+                        for field, snippets in highlight.items():
+                            html.append(f"<div style='margin-top:5px;'><em>{escape(field)} のヒット個所 ({len(snippets)}):</em>")
+                            html.append("<ul>")
+                            for snippet in snippets:
+                                html.append(f"<li>{snippet}</li>")
+                            html.append("</ul></div>")
+                    html.append("</li>")
                 html.append("</ul>")
             else:
-                html.append(f"<p>Error searching: {res.text}</p>")
+                html.append(f"<p>Error searching: {escape(res.text)}</p>")
         except Exception as e:
-            html.append(f"<p>Search error: {e}</p>")
+            html.append(f"<p>Search error: {escape(str(e))}</p>")
     html.append("</body></html>")
     return render_template_string("".join(html))
+
+@app.route("/open", methods=["GET"])
+def open_file():
+    """
+    ファイル名や行番号のパラメータを受け取り、該当ファイルの内容を行番号付きで表示します。
+    指定行があれば、その行をハイライトし、自動スクロールで表示位置を調整します。
+    """
+    file_param = request.args.get("file", "")
+    try:
+        line_number = int(request.args.get("line", "0"))
+    except ValueError:
+        line_number = 0
+    if not file_param:
+        return "File parameter is missing.", 400
+
+    # Windows形式 (例: "Z:\path\to\file.txt") を /mnt/z 以下のパスに変換
+    if file_param.startswith("Z:"):
+        file_path = "/mnt/z" + file_param[2:].replace("\\", "/")
+    else:
+        file_path = file_param
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        return f"Error reading file: {escape(str(e))}", 500
+
+    # HTML 出力：各行に行番号を付け、指定行をハイライト
+    html = """
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>File Viewer - {file_name}</title>
+        <style>
+          pre {{
+            counter-reset: linenumber;
+          }}
+          pre span.line:before {{
+            counter-increment: linenumber;
+            content: counter(linenumber) ". ";
+            color: #888;
+          }}
+          .highlight {{
+            background-color: yellow;
+          }}
+        </style>
+      </head>
+      <body>
+        <h1>{file_name}</h1>
+        <pre>
+    """.format(file_name=escape(file_param))
+    for idx, line in enumerate(lines, start=1):
+        if line_number and idx == line_number:
+            html += "<span class='line highlight'>{}</span>".format(escape(line))
+        else:
+            html += "<span class='line'>{}</span>".format(escape(line))
+    html += """
+        </pre>
+        <script>
+          var highlighted = document.querySelector('.highlight');
+          if (highlighted) { highlighted.scrollIntoView(); }
+        </script>
+      </body>
+    </html>
+    """
+    return html
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

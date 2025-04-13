@@ -50,7 +50,8 @@ PROJECT_ROOT="${BASE_DIR}/pleasanterDocker"
 if [ -d "${PROJECT_ROOT}" ]; then
     echo "既存の '${PROJECT_ROOT}' フォルダが見つかりました。全てを削除して作り直します..."
     cd "${PROJECT_ROOT}" || exit 1
-    docker compose down --volumes
+    docker compose down # ボリュームまで完全削除なら、docker compose down --volumes
+
     cd "${BASE_DIR}" || exit 1
     rm -rf "${PROJECT_ROOT}"
 fi

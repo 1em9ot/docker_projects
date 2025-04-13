@@ -12,7 +12,7 @@ services:
         soft: -1
         hard: -1
     volumes:
-      - esdata:/usr/share/elasticsearch/data
+      - './persistent:/usr/share/elasticsearch/data'
     ports:
       - '9200:9200'
   app:
@@ -21,8 +21,7 @@ services:
     depends_on:
       - elasticsearch
     volumes:
+      - './app:/app'
       - '/mnt/z:/mnt/zdrive:ro'
     ports:
       - '5000:5000'
-volumes:
-  esdata:

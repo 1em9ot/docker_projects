@@ -1,29 +1,43 @@
 #!/bin/bash
 # create_and_run_zdrive_search_project.sh
 # このスクリプトは、Zドライブ全文検索エンジン（Flask + Elasticsearch）の
-# Docker Compose プロジェクトをまるごと生成し、既存のプロジェクトがあれば削除、
+# Docker Compose プロジェクトをまるごと生成し、既存のプロジェクトがあれば削除（一部永続化フォルダは保持）、
 # Docker イメージをビルドして全サービスを自動で起動します。
 #
 # ※ホストの Z ドライブを利用するため、Docker Desktop の設定で /mnt/z (または Z ドライブ共有) が有効であることをご確認ください。
 #
-# :contentReference[oaicite:0]{index=0}
-
+# 運用時は、ホスト側の「persistent」フォルダ内にデータが永続化されるので、
+# 検証用に中身を編集することができます。また、本番環境でも初回生成時に永続化フォルダが自動生成され、
+# 既存のデータが保持される設計となっています。
+#
 set -e
 
 PROJECT_DIR="ZDriveSearchProject"
 
-# 既存のプロジェクトフォルダが存在する場合は削除
+# 既存のプロジェクトフォルダが存在する場合、永続化フォルダ(persistent)があれば退避しておく
 if [ -d "$PROJECT_DIR" ]; then
-    echo "既存の '$PROJECT_DIR' フォルダが見つかりました。削除します..."
+    echo "既存の '$PROJECT_DIR' フォルダが見つかりました。永続化フォルダは保持します..."
+    if [ -d "$PROJECT_DIR/persistent" ]; then
+         echo "永続化フォルダが検出されたため、一時退避します..."
+         mv "$PROJECT_DIR/persistent" /tmp/persistent_backup_$$
+    fi
     rm -rf "$PROJECT_DIR"
+    mkdir -p "$PROJECT_DIR"
+    if [ -d /tmp/persistent_backup_$$ ]; then
+         mv /tmp/persistent_backup_$$ "$PROJECT_DIR/persistent"
+    fi
+else
+    mkdir -p "$PROJECT_DIR"
 fi
 
-echo "プロジェクトフォルダ '$PROJECT_DIR' を作成します…"
-mkdir -p "$PROJECT_DIR"/elasticsearch
-mkdir -p "$PROJECT_DIR"/app
+# 必要なサブフォルダを作成（既存の永続化フォルダはそのまま保持）
+mkdir -p "$PROJECT_DIR/elasticsearch"
+mkdir -p "$PROJECT_DIR/app"
+mkdir -p "$PROJECT_DIR/persistent"
 
 ########################################
-# docker-compose.yml の生成
+# docker-compose.yml の生成（Elasticsearch のデータはホスト側 persistent フォルダに永続化、
+# また、app サービスはホストの app フォルダをバインドマウントしてソース変更がすぐ反映される）
 ########################################
 echo "docker-compose.yml を作成します…"
 cat > "$PROJECT_DIR/docker-compose.yml" << 'EOF'
@@ -41,7 +55,7 @@ services:
         soft: -1
         hard: -1
     volumes:
-      - esdata:/usr/share/elasticsearch/data
+      - './persistent:/usr/share/elasticsearch/data'
     ports:
       - '9200:9200'
   app:
@@ -50,11 +64,10 @@ services:
     depends_on:
       - elasticsearch
     volumes:
+      - './app:/app'
       - '/mnt/z:/mnt/zdrive:ro'
     ports:
       - '5000:5000'
-volumes:
-  esdata:
 EOF
 
 ########################################
@@ -90,7 +103,7 @@ requests==2.31.0
 EOF
 
 ########################################
-# app/app.py の生成（修正済み：ドキュメント文字列はそのままの """ 形式）
+# app/app.py の生成（検索結果にヒット件数、スコア、全ハイライトを表示するように改修）
 ########################################
 echo "app/app.py を作成します…"
 cat > "$PROJECT_DIR/app/app.py" << 'EOF'
@@ -193,7 +206,7 @@ def index_files():
     try:
         scroll_res = requests.post(f"{ES_URL}/{INDEX_NAME}/_search",
                                    params={"scroll": "1m", "size": 1000},
-                                   json={"_source": False, "query": {"match_all": {}}})
+                                   json={"_source": True, "query": {"match_all": {}}})
         if scroll_res.ok:
             data = scroll_res.json()
             scroll_id = data.get("_scroll_id")
@@ -239,7 +252,7 @@ def search():
     query = request.args.get("q", "").strip()
     html = ["<html><head><meta charset='UTF-8'><title>File Search</title></head><body>"]
     html.append("<h1>File Search</h1>")
-    html.append("<form method='GET' action='/'><input type='text' name='q' value='{}'/>".format(request.args.get("q", "")))
+    html.append("<form method='GET' action='/'><input type='text' name='q' value='{}'/>".format(escape(query)))
     html.append("<input type='submit' value='Search'/></form><hr/>")
     if query:
         search_query = {
@@ -251,7 +264,8 @@ def search():
             },
             "highlight": {
                 "fields": {
-                    "content": {"fragment_size": 100, "number_of_fragments": 1}
+                    "content": {"fragment_size": 100, "number_of_fragments": 3},
+                    "filename": {"fragment_size": 50, "number_of_fragments": 1}
                 }
             }
         }
@@ -259,11 +273,13 @@ def search():
             res = requests.post(f"{ES_URL}/{INDEX_NAME}/_search", json=search_query)
             if res.ok:
                 data = res.json()
+                total_hits = data.get("hits", {}).get("total", {}).get("value", 0)
                 hits = data.get("hits", {}).get("hits", [])
-                html.append(f"<p>Found {len(hits)} result(s) for '<strong>{query}</strong>'.</p>")
+                html.append(f"<p>Found {total_hits} result(s) for '<strong>{escape(query)}</strong>'.</p>")
                 html.append("<ul>")
                 for hit in hits:
                     source = hit.get("_source", {})
+                    score = hit.get("_score", 0)
                     filename = source.get("filename", "")
                     size = source.get("size", "")
                     modified = source.get("modified", "")
@@ -271,23 +287,25 @@ def search():
                     if modified:
                         try:
                             modified = modified.split(".")[0].replace("T", " ")
-                        except:
+                        except Exception:
                             pass
-                    snippet = ""
+                    html.append("<li>")
+                    html.append(f"<strong>{escape(filename)}</strong> ( {size} bytes, {escape(modified)} ) - Score: {score}<br/>")
+                    html.append(f"<small>Path: {escape(path)}</small><br/>")
                     highlight = hit.get("highlight", {})
                     if highlight:
-                        snippets = highlight.get("content", [])
-                        if snippets:
-                            snippet = snippets[0]
-                    html.append("<li><strong>{}</strong> ({} bytes, {})<br/>".format(filename, size, modified))
-                    if snippet:
-                        html.append("<div>... {} ...</div>".format(snippet))
-                    html.append("<small>Path: {}</small></li>".format(path))
+                        for field, snippets in highlight.items():
+                            html.append(f"<div style='margin-top:5px;'><em>{escape(field)} のヒット個所 ({len(snippets)}):</em>")
+                            html.append("<ul>")
+                            for snippet in snippets:
+                                html.append(f"<li>{snippet}</li>")
+                            html.append("</ul></div>")
+                    html.append("</li>")
                 html.append("</ul>")
             else:
-                html.append(f"<p>Error searching: {res.text}</p>")
+                html.append(f"<p>Error searching: {escape(res.text)}</p>")
         except Exception as e:
-            html.append(f"<p>Search error: {e}</p>")
+            html.append(f"<p>Search error: {escape(str(e))}</p>")
     html.append("</body></html>")
     return render_template_string("".join(html))
 
@@ -300,9 +318,9 @@ echo "生成されたディレクトリ構造:"
 find "$PROJECT_DIR" -print
 
 ########################################
-# プロジェクトディレクトリへ移動してビルド・起動
+# プロジェクトフォルダへ移動してビルド・起動
 ########################################
-echo "プロジェクトディレクトリに移動します…"
+echo "プロジェクトフォルダに移動します…"
 cd "$PROJECT_DIR"
 
 echo "Docker イメージをビルドします…"
