@@ -1,23 +1,20 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-概要
+【概要】
 本ツールは、WizTree出力のCSVファイル（先頭1行は不要、2行目がヘッダー）を対象に、
-非同期I/O、スレッド、プロセス並列でインデックス作成を行い、
-MariaDBへの並列書き込みを実現します。
+非同期I/O、並列処理（プロセスプールの動的ワーカー管理およびワーク・スティーリング機能付き）、
+DBへの大量インサートをパイプライン的に実現します。
 
 改善点：
-  1. メモリマッピング＋インクリメンタルデコーダーおよび PyArrow による高速CSVパース
-  2. MariaDB への並列書き込み（pymysql利用、UTF8設定済）
-  3. 全チャンクを単一のプロセスプールに投入することで、作業タスクを共有し、
-     ワーク・スティーリングにより高スループットを実現
-  4. 各種パラメータ（チャンクサイズ、ブロックサイズ、スレッドワーカー数など）を設定クラスに集約
-  5. 最終的なCPUコア数と動的並列度を標準出力に表示
-  6. WSL上でWindows側のファイルパスを扱えるようにパス変換処理を追加
-  7. 強制終了時に一時ファイル（TEMP_DIR）を全削除するクリーンアップ処理
+  - 非同期I/Oによるファイル読み込み
+  - 汎用並列実行ライブラリ（my_parallel_executor.py）の利用により、
+    動的ワーカー管理、タスク粒度調整、ワークスティーリング風負荷分散、実行時間プロファイルの集計とログ出力を実現
+  - 統計情報は最終的に標準出力および日付付きログファイル（profile_log_YYYYMMDD.txt）に出力
 
-※ Windowsでは、各プロセスをCPUグループに割り当てる設定を含む。
+※ 並列実行部分はすべて my_parallel_executor.py に実装済み。fileMaster1.5.py はその利用例として実装しています。
 """
+
 import os, threading, hashlib, asyncio, time, mmap, glob, codecs, psutil, re, signal, shutil, sys
 from io import StringIO
 import tkinter as tk
@@ -38,8 +35,8 @@ except ImportError:
 import pymysql
 from pymysql.cursors import DictCursor
 
-# 並列処理ライブラリとして、my_parallel_executor の run_parallel_tasks を使用
-from my_parallel_executor import run_parallel_tasks
+# 並列処理ライブラリ：高度化版 my_parallel_executor を利用
+from my_parallel_executor import run_parallel_tasks  # 【message_idx†turn12file1】
 
 # ---------------------------
 # グローバル設定：Windows用 CPU グループ割り当て
@@ -133,7 +130,7 @@ class ProcessorConfig:
         self.db_user = 'root'
         self.db_password = 'my-secret-pw'
         self.db_name = 'wiztree'
-
+        
 # ---------------------------
 # DynamicSemaphore: 動的並列制御用セマフォ（今回は固定並列なので利用はしない）
 # ---------------------------
@@ -149,14 +146,14 @@ class DynamicSemaphore:
     @property
     def max_value(self):
         return self._max
-
+       
 # ---------------------------
 # CSVReader: CSV読み込みクラス
 # ---------------------------
 class CSVReader:
     def __init__(self, config: ProcessorConfig):
         self.config = config
-
+        
     async def async_read_csv_blocks(self, csv_file, chunk_size=None, block_size=None):
         if chunk_size is None:
             chunk_size = self.config.chunk_size
@@ -222,27 +219,12 @@ class CSVReader:
         print(f"[Profile] Total CSV reading time: {total_time:.2f} sec")
 
 # ---------------------------
-# データ整形・フィルタ処理用ユーティリティ関数
-# ---------------------------
-def file_exists(path):
-    """ファイルパスが存在するかを確認する"""
-    return os.path.exists(path)
-
-def extract_file_name(path):
-    """ファイルパスからファイル名を抽出する"""
-    return os.path.basename(os.path.normpath(path))
-
-def generate_file_id(file_path, folder):
-    """ファイルパスとフォルダー情報から一意のハッシュIDを生成する"""
-    return hashlib.md5((str(file_path) + str(folder)).encode('utf-8')).hexdigest()
-
-# ---------------------------
 # DBHandler: MariaDB用 DB 初期化およびチャンク毎の挿入処理
 # ---------------------------
 class DBHandler:
     def __init__(self):
         pass
-
+        
     @staticmethod
     def get_connection(config: ProcessorConfig):
         return pymysql.connect(
@@ -255,7 +237,7 @@ class DBHandler:
             cursorclass=DictCursor,
             autocommit=True
         )
-
+    
     @staticmethod
     def init_db(config: ProcessorConfig):
         db_init_start = time.perf_counter()
@@ -295,23 +277,21 @@ class DBHandler:
             conn.close()
         db_init_end = time.perf_counter()
         print(f"[Profile] Table creation executed in {db_init_end - db_init_mid:.4f} sec")
-
+    
     @staticmethod
     def index_chunk_sync(df_chunk, base_thread_pool_workers, config: ProcessorConfig):
-        # プロファイリング: チャンク処理開始
         start_proc = time.time()
         log_lines = []
         conn = DBHandler.get_connection(config)
         try:
             def check_row(row):
-                # 各行のファイルパスを検証し、存在する場合に返す
+                # 各行のファイルパスの存在を確認
                 file_path = row['ファイル名']
                 if os.name != 'nt':
                     file_path = convert_windows_path_to_wsl(file_path)
-                if not file_exists(file_path):
+                if not os.path.exists(file_path):
                     return None
                 return (file_path, row)
-            # CPU負荷に応じた動的スレッド数の決定
             cpu_load = psutil.cpu_percent(interval=0.1)
             dynamic_workers = max(1, int(base_thread_pool_workers * (100 - cpu_load) / 100))
             with ThreadPoolExecutor(max_workers=dynamic_workers) as executor:
@@ -324,13 +304,11 @@ class DBHandler:
                             filtered_data.append(result)
                     except Exception as e:
                         log_lines.append(f"Error in thread pool: {e}")
-            # プロファイリング: スレッド処理終了
             print(f"[Profile] Thread pool processing completed for current chunk")
-            # 挿入データの整形
             insert_values = []
             for file_path, row in filtered_data:
-                file_name = extract_file_name(file_path)
-                file_id = generate_file_id(file_path, row['フォルダー'])
+                file_name = os.path.basename(os.path.normpath(file_path))
+                file_id = hashlib.md5((str(file_path) + str(row['フォルダー'])).encode('utf-8')).hexdigest()
                 insert_values.append((
                     file_id,
                     file_path,
@@ -342,7 +320,6 @@ class DBHandler:
                     row['ファイル数'],
                     row['フォルダー']
                 ))
-            # DBへデータ挿入
             if insert_values:
                 DBHandler.insert_records(conn, insert_values)
             elapsed = time.time() - start_proc
@@ -352,7 +329,7 @@ class DBHandler:
         finally:
             conn.close()
         return "\n".join(log_lines)
-
+    
     @staticmethod
     def insert_records(conn, records):
         with conn.cursor() as cursor:
@@ -374,7 +351,7 @@ async def async_enumerate(aiterable, start=0):
         idx += 1
 
 # ---------------------------
-# WizTreeProcessor: メインパイプライン処理クラス（MariaDBへの並列挿入・ワーク・スティーリング実現）
+# WizTreeProcessor: パイプライン処理クラス
 # ---------------------------
 class WizTreeProcessor:
     def __init__(self, config: ProcessorConfig):
@@ -382,22 +359,20 @@ class WizTreeProcessor:
         self.csv_reader = CSVReader(config)
         self.db_handler = DBHandler()
         self.dynamic_semaphore = DynamicSemaphore(config.initial_max_concurrent)
-
+    
     async def _monitor_load(self):
-        # 今回は動的調整を無効化（固定並列運用）
         await asyncio.sleep(0.5)
-
+    
     def _timed_index_chunk_sync(self, df_chunk, base_thread_pool_workers, config: ProcessorConfig):
         t0 = time.perf_counter()
         result = self.db_handler.index_chunk_sync(df_chunk, base_thread_pool_workers, config)
         elapsed = time.perf_counter() - t0
         return result, elapsed
-
+    
     async def process_csv(self, csv_file, log_callback):
         logs = []
         logs.append(f"Pipeline processing started: {csv_file}")
         logs.append("Initializing MariaDB main table...")
-        # プロファイリング: DB初期化時間の計測
         db_init_start = time.perf_counter()
         self.db_handler.init_db(self.config)
         db_init_time = time.perf_counter() - db_init_start
@@ -413,16 +388,15 @@ class WizTreeProcessor:
         start_pipeline = time.perf_counter()
         loop = asyncio.get_running_loop()
         def run_tasks():
-            return run_parallel_tasks(tasks, mode='process', max_workers=total_cpus, profile=True, logger=lambda msg: logs.append(msg))
+            return run_parallel_tasks(tasks, mode='process', max_workers=total_cpus, profile=True, 
+                                      logger=lambda msg: logs.append(msg))
         results = await loop.run_in_executor(None, run_tasks)
         pipeline_elapsed = time.perf_counter() - start_pipeline
         chunk_timings = []
-        # 各タスクの結果と実行時間の処理
         for item in results:
             if isinstance(item, tuple) and len(item) == 2:
                 res_val, elapsed_val = item
                 if isinstance(res_val, tuple) and len(res_val) == 2 and isinstance(res_val[1], (int, float)):
-                    # タスク関数から(結果, 時間)が返された場合
                     logs.append(res_val[0])
                     chunk_timings.append(res_val[1])
                 else:
@@ -431,10 +405,8 @@ class WizTreeProcessor:
                         chunk_timings.append(elapsed_val)
             else:
                 if isinstance(item, Exception):
-                    # エラー発生時はログ済みのためスキップ
                     continue
                 logs.append(item)
-        # 集計: 平均 / 最小 / 最大チャンク時間の計算
         if chunk_timings:
             total_chunks = len(chunk_timings)
             avg_chunk_time = sum(chunk_timings) / total_chunks
@@ -447,12 +419,12 @@ class WizTreeProcessor:
             )
             logs.append(summary)
             print(summary)
-            # プロファイル情報を日付付きファイルに追記保存
+            # 追記ログファイルへの書き出し（実行日付付きファイル）
             log_date = time.strftime('%Y%m%d')
             profile_filename = f"profile_log_{log_date}.txt"
             try:
-                with open(profile_filename, 'a', encoding='utf-8') as f:
-                    f.write(summary + "\n")
+                with open(profile_filename, 'a', encoding='utf-8') as pf:
+                    pf.write(summary + "\n")
             except Exception as e:
                 err_msg = f"[Error] Failed to write profile log: {e}"
                 logs.append(err_msg)
@@ -460,7 +432,7 @@ class WizTreeProcessor:
         cpu_cores = os.cpu_count() or 1
         final_dynamic_concurrency = self.dynamic_semaphore.max_value
         logs.append(f"CPUコア数: {cpu_cores}, 最終的な動的並列度: {final_dynamic_concurrency}")
-        logs.append("IO並列処理により、待ち時間が十分に活用され、高いDB挿入スループットが達成されています。")
+        logs.append("IO並列処理により、待ち時間を十分に活用し、高いDB挿入スループットが達成されています。")
         return logs
 
 # ---------------------------
