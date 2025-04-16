@@ -4,3 +4,8 @@ __pycache__/
 *.pyo
 *.pyd
 __init__.py
+
+#ガチなキー
+.env
+/bitflyer/.env
+/bitflyer/bitflyerlightningapp/.env
