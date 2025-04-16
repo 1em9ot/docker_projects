@@ -1,8 +1,8 @@
 services:
-  bitintel:
+  bitflyerlightningapp:
     build: ./app
-    container_name: bitintel
-    image: bitintel
+    container_name: bitflyerlightningapp
+    image: bitflyerlightningapp
     env_file: .env
     volumes:
       - './app:/app'

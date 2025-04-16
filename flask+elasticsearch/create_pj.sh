@@ -310,7 +310,7 @@ def search():
     return render_template_string("".join(html))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000,debug=True)
 EOF
 
 echo "プロジェクトフォルダ '$PROJECT_DIR' の生成が完了しました。"
