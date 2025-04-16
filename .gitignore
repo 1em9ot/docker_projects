@@ -7,5 +7,5 @@ __init__.py
 
 #ガチなキー
 .env
-/bitflyer/.env
-/bitflyer/bitflyerlightningapp/.env
+/bitcoin/.env
+/bitcoin/trade/.env

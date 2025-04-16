@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 WORKDIR /app
-# システム時刻を JST に設定（tzdata インストール）
+# タイムゾーンを JST (Asia/Tokyo) に設定
 RUN apt-get update && apt-get install -y tzdata && \
     ln -snf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime && \
     echo 'Asia/Tokyo' > /etc/timezone && \
