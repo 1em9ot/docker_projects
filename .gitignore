@@ -4,6 +4,3 @@ __pycache__/
 *.pyo
 *.pyd
 __init__.py
-
-/home/user/docker_projects/bitflyer/.env
-/home/user/docker_projects/bitflyer/bitflyerlightningapp/.env
