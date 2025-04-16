@@ -7,3 +7,5 @@
 # docker_projects フォルダーは無視しない（およびその全内容も追跡対象とする）
 !/docker_projects/
 !/docker_projects/**
+
+.git_backup
