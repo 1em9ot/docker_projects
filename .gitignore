@@ -1,11 +1,6 @@
-# すべてのファイル・フォルダーを無視
-/*
-
-# この .gitignore 自体は無視しない
-!.gitignore
-
-# docker_projects フォルダーは無視しない（およびその全内容も追跡対象とする）
-!/docker_projects/
-!/docker_projects/**
-
-.git_backup
+# Python のバイトコードキャッシュや __init__.py を無視
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+__init__.py

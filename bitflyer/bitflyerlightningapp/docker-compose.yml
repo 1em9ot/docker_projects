@@ -1,0 +1,11 @@
+services:
+  bitflyerlightningapp:
+    build: ./app
+    container_name: bitflyerlightningapp
+    image: bitflyerlightningapp
+    env_file: .env
+    volumes:
+      - './app:/app'
+      - './persistent:/persistent'
+    ports:
+      - '8050:8050'
