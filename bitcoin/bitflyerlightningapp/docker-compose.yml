@@ -3,6 +3,7 @@ services:
     build: ./app
     container_name: bitflyerlightningapp
     image: bitflyerlightningapp
+    restart: always
     env_file: .env
     volumes:
       - './app:/app'

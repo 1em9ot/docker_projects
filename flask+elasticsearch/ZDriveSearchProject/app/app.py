@@ -4,9 +4,7 @@ import threading
 import json
 from datetime import datetime
 import requests
-from flask import Flask, request, escape, render_template_string, send_file
-from urllib.parse import quote
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from flask import Flask, request, escape, render_template_string
 
 app = Flask(__name__)
 
@@ -14,8 +12,6 @@ app = Flask(__name__)
 ES_URL = os.environ.get("ES_URL", "http://elasticsearch:9200")
 INDEX_NAME = os.environ.get("INDEX_NAME", "files")
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "300"))
-# 解析対象から除外するための文字数閾値（例: 1,000,000文字を超える場合）
-SKIP_LENGTH_THRESHOLD = int(os.environ.get("SKIP_LENGTH_THRESHOLD", "1000000"))
 # 対象とするテキストファイルの拡張子セット
 TEXT_EXTENSIONS = {".txt", ".md", ".log", ".csv", ".json", ".py", ".java", ".c", ".cpp", ".html", ".htm", ".mhtml"}
 
@@ -51,60 +47,46 @@ def ensure_index():
         if not res.ok:
             print(f"Failed to create index: {res.text}")
 
-def process_file(file_path, fname):
-    try:
-        with open(file_path, "rb") as f:
-            raw = f.read()
-        try:
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            try:
-                content = raw.decode("cp932")
-            except UnicodeDecodeError:
-                content = raw.decode("utf-8", errors="ignore")
-        size = os.path.getsize(file_path)
-        mtime = os.path.getmtime(file_path)
-        modified_iso = datetime.fromtimestamp(mtime).isoformat()
-        # /mnt/zdrive 以下のパスを Windows 形式の "Z:\" パスに変換
-        win_path = "Z:" + file_path[len("/mnt/zdrive"):].replace("/", "\\")
-        if len(content) > SKIP_LENGTH_THRESHOLD:
-            # 長大な内容の場合、解析対象外としプレースホルダ文字列を設定する
-            print(f"解析対象外: {file_path}（内容が長すぎるため、解析をスキップ）")
-            content = "[このファイルは内容が長すぎるため、解析対象外です。]"
-        doc = {
-            "path": win_path,
-            "filename": fname,
-            "extension": os.path.splitext(fname)[1].lower(),
-            "size": size,
-            "modified": modified_iso,
-            "content": content
-        }
-        return (win_path, doc)
-    except Exception as e:
-        print(f"Failed to index {file_path}: {e}")
-        return None
-
 def index_files():
+    """/mnt/zdrive を走査し、テキストファイルをすべて Elasticsearch にインデックス化する"""
     files_indexed = []
     bulk_actions = []
-    tasks = []
-    # CPUコア数に合わせたスレッド数でファイルを並列処理
-    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        for root, dirs, files in os.walk("/mnt/zdrive"):
-            for fname in files:
-                file_path = os.path.join(root, fname)
-                ext = os.path.splitext(fname)[1].lower()
-                if ext not in TEXT_EXTENSIONS:
-                    continue
-                tasks.append(executor.submit(process_file, file_path, fname))
-        for future in as_completed(tasks):
-            result = future.result()
-            if result:
-                win_path, doc = result
-                files_indexed.append(win_path)
+    for root, dirs, files in os.walk("/mnt/zdrive"):
+        for fname in files:
+            file_path = os.path.join(root, fname)
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in TEXT_EXTENSIONS:
+                continue
+            try:
+                with open(file_path, "rb") as f:
+                    raw = f.read()
+                try:
+                    content = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    try:
+                        content = raw.decode("cp932")
+                    except UnicodeDecodeError:
+                        content = raw.decode("utf-8", errors="ignore")
+                size = os.path.getsize(file_path)
+                mtime = os.path.getmtime(file_path)
+                modified_iso = datetime.fromtimestamp(mtime).isoformat()
+                # /mnt/zdrive 以下のパスを Windows 形式の "Z:\" パスに変換
+                win_path = "Z:" + file_path[len("/mnt/zdrive"):].replace("/", "\\")
                 action = {"index": {"_index": INDEX_NAME, "_id": win_path}}
+                doc = {
+                    "path": win_path,
+                    "filename": fname,
+                    "extension": ext,
+                    "size": size,
+                    "modified": modified_iso,
+                    "content": content
+                }
                 bulk_actions.append(action)
                 bulk_actions.append(doc)
+                files_indexed.append(win_path)
+            except Exception as e:
+                print(f"Failed to index {file_path}: {e}")
+                continue
     if not bulk_actions:
         return
     bulk_body = "\n".join(json.dumps(item, ensure_ascii=False) for item in bulk_actions) + "\n"
@@ -159,25 +141,11 @@ threading.Thread(target=periodic_index_task, daemon=True).start()
 @app.route("/", methods=["GET"])
 def search():
     query = request.args.get("q", "").strip()
-    html = [
-        "<html>",
-          "<head>",
-            "<meta charset='UTF-8'>",
-            "<title>File Search</title>",
-            "<style>",
-              "body { font-family: Arial, sans-serif; }",
-              "em { background-color: transparent; font-style: italic; }",
-              "a { text-decoration: none; color: blue; }",
-              "a:hover { text-decoration: underline; }",
-            "</style>",
-          "</head>",
-          "<body>"
-    ]
+    html = ["<html><head><meta charset='UTF-8'><title>File Search</title></head><body>"]
     html.append("<h1>File Search</h1>")
     html.append("<form method='GET' action='/'><input type='text' name='q' value='{}'/>".format(escape(query)))
     html.append("<input type='submit' value='Search'/></form><hr/>")
     if query:
-        # Elasticsearch への検索クエリ
         search_query = {
             "query": {
                 "multi_match": {
@@ -214,8 +182,7 @@ def search():
                             pass
                     html.append("<li>")
                     html.append(f"<strong>{escape(filename)}</strong> ( {size} bytes, {escape(modified)} ) - Score: {score}<br/>")
-                    # /file エンドポイントを利用して、新タブでファイルを開く
-                    html.append(f"<small>Path: <a href='/file?path={quote(path)}' target='_blank' rel='noopener noreferrer'>{escape(path)}</a></small><br/>")
+                    html.append(f"<small>Path: {escape(path)}</small><br/>")
                     highlight = hit.get("highlight", {})
                     if highlight:
                         for field, snippets in highlight.items():
@@ -232,24 +199,6 @@ def search():
             html.append(f"<p>Search error: {escape(str(e))}</p>")
     html.append("</body></html>")
     return render_template_string("".join(html))
-
-@app.route("/file", methods=["GET"])
-def serve_file():
-    """/file エンドポイントでは、渡された Windows 形式のパスを /mnt/zdrive に変換し、
-    HTML ファイルの場合は text/html で返す"""
-    file_path = request.args.get("path", "")
-    if not file_path:
-        return "No path provided", 400
-    if not file_path.startswith("Z:"):
-        return "Invalid file path", 400
-    actual_path = "/mnt/zdrive" + file_path[2:].replace("\\", "/")
-    if not os.path.exists(actual_path):
-        return "File not found", 404
-    ext = os.path.splitext(actual_path)[1].lower()
-    if ext in {".html", ".htm", ".mhtml"}:
-        return send_file(actual_path, mimetype="text/html")
-    else:
-        return send_file(actual_path)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000,debug=True)

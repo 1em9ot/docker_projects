@@ -43,6 +43,7 @@ echo "docker-compose.yml を作成します…"
 cat > "$PROJECT_DIR/docker-compose.yml" << 'EOF'
 services:
   elasticsearch:
+    restart: always
     build: ./elasticsearch
     container_name: elasticsearch
     environment:
@@ -59,6 +60,7 @@ services:
     ports:
       - '9200:9200'
   app:
+    restart: always
     build: ./app
     container_name: flask_app
     depends_on:

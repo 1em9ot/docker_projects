@@ -6,7 +6,8 @@
 # このスクリプトは、既存のプロジェクトがあれば削除（persistent フォルダはバックアップ）し、
 # 必要なファイル（docker-compose.yml、app/Dockerfile、app/requirements.txt、app/app.py）を生成後、
 # 同層にある .env を自動配置し、Docker コンテナ・イメージ・ボリュームを完全にリセットした上で
-# キャッシュ無視でビルド、サービスを起動します。
+# キャッシュ無視でビルド、サービスを起動します。なお、docker-compose.yml の restart: always 設定により
+# システム再起動時も自動スタートアップに対応します。
 #
 # ※ WSL 環境では、プロジェクトフォルダを Linux 側に置くとパフォーマンスが向上します。
 # ※ ポート8050が既に使用中の場合はエラーを出して中止します。
@@ -50,7 +51,7 @@ mkdir -p "$PROJECT_DIR/app"
 mkdir -p "$PROJECT_DIR/persistent"
 
 ########################################
-# docker-compose.yml の生成
+# docker-compose.yml の生成（restart: always を追加）
 ########################################
 echo "docker-compose.yml を作成します..."
 cat > "$PROJECT_DIR/docker-compose.yml" << 'EOF'
@@ -59,6 +60,7 @@ services:
     build: ./app
     container_name: bitflyerlightningapp
     image: bitflyerlightningapp
+    restart: always
     env_file: .env
     volumes:
       - './app:/app'
@@ -88,17 +90,19 @@ CMD ["python", "app.py"]
 EOF
 
 ########################################
-# app/requirements.txt の生成
+# app/requirements.txt の生成（dash_bootstrap_components 追加）
 ########################################
 echo "app/requirements.txt を作成します..."
 cat > "$PROJECT_DIR/app/requirements.txt" << 'EOF'
 dash==2.11.1
 requests==2.31.0
 dash_bootstrap_components==1.4.1
+pandas
+ccxt
 EOF
 
 ########################################
-# app/app.py の生成（注文モーダル・シミュレーション拡張版）
+# app/app.py の生成（最新の注文モーダル・シミュレーション拡張版）
 ########################################
 echo "app/app.py を作成します..."
 cat > "$PROJECT_DIR/app/app.py" << 'EOF'
@@ -385,21 +389,21 @@ if __name__ == "__main__":
 EOF
 
 ########################################
-# .env ファイルの配置（同層に存在する .env をプロジェクトフォルダにコピー）
+# .env ファイルの配置（.env をプロジェクトフォルダにコピー）
 ########################################
 if [ -f .env ]; then
     echo ".env ファイルが見つかったので、プロジェクトフォルダにコピーします..."
     cp .env "$PROJECT_DIR/.env"
 else
-    echo "Error: 同層に .env ファイルが見つかりません。プロジェクトの実行を中止します。"
+    echo "Error: .env ファイルが見つかりません。プロジェクトの実行を中止します。"
     exit 1
 fi
 
-# 完全にクリーンな状態にするため、既存のコンテナ、イメージ、ボリュームを全削除
+# 古いコンテナ、イメージ、ボリュームを全削除
 echo "古いコンテナ、イメージ、ボリュームを全削除します..."
 docker compose -f "$PROJECT_DIR/docker-compose.yml" down --rmi all --volumes --remove-orphans
 
-# キャッシュを無視してビルドし、コンテナ起動
+# キャッシュ無視でビルドし、コンテナ起動
 echo "Docker イメージをキャッシュ無視でビルドし、サービスを起動します..."
 docker compose -f "$PROJECT_DIR/docker-compose.yml" build --no-cache
 docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
