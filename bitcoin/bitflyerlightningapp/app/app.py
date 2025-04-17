@@ -3,235 +3,250 @@ import time
 import hmac
 import hashlib
 import logging
+import json
 import requests
-import pandas as pd
 from datetime import datetime
-from dash import Dash, dcc, html, Input, Output, State, no_update, dash_table
+from dash import Dash, dcc, html, Input, Output, State, dash_table
 import dash_bootstrap_components as dbc
 
 # ——————————————————————————————————
 # 環境変数
 # ——————————————————————————————————
-API_URL     = "https://api.bitflyer.com"
-API_KEY     = os.environ.get("BITFLYER_API_KEY")
-API_SECRET  = os.environ.get("BITFLYER_API_SECRET")
-NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
+API_URL    = "https://api.bitflyer.com"
+API_KEY    = os.environ.get("BITFLYER_API_KEY")
+API_SECRET = os.environ.get("BITFLYER_API_SECRET")
 
-logging.basicConfig(filename="/persistent/app.log", level=logging.INFO)
-logging.info(f"Dash app started at {datetime.now()}")
-
-# 履歴用グローバル
-price_times = []
-price_vals  = []
+logging.basicConfig(level=logging.INFO)
+logging.info(f"App started at {datetime.now()}")
 
 # ——————————————————————————————————
-# データ取得関数
+# BitFlyer API ヘルパー
 # ——————————————————————————————————
-def get_ticker(product_code="BTC_JPY"):
-    try:
-        r = requests.get(f"{API_URL}/v1/ticker?product_code={product_code}", timeout=5)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        logging.error(f"get_ticker error: {e}")
-        return {}
+def _get_signature(ts: str, method: str, path: str, body: str = "") -> str:
+    text = ts + method + path + body
+    return hmac.new(API_SECRET.encode(), text.encode(), hashlib.sha256).hexdigest()
 
-def get_news_events():
-    if not NEWSAPI_KEY:
-        return []
-    url = "https://newsapi.org/v2/everything"
-    frm = (datetime.utcnow() - pd.Timedelta(minutes=10)).isoformat() + "Z"
-    params = {
-        "q":        "Bitcoin",
-        "language": "en",
-        "sortBy":   "publishedAt",
-        "pageSize": 10,
-        "from":     frm,
-        "apiKey":   NEWSAPI_KEY
-    }
-    try:
-        r = requests.get(url, params=params, timeout=5)
-        r.raise_for_status()
-        return r.json().get("articles", [])
-    except Exception as e:
-        logging.error(f"get_news_events error: {e}")
-        return []
 
-def get_positions():
-    """Bitflyer Lightning API: 現在のポジション一覧を取得"""
-    if not API_KEY or not API_SECRET:
-        return []
+def get_ticker(product_code: str = "BTC_JPY") -> dict:
+    resp = requests.get(f"{API_URL}/v1/ticker?product_code={product_code}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def send_childorder_limit(jpy_amount: float, side: str) -> dict:
+    tk = get_ticker()
+    price = tk.get("ltp") or tk.get("best_bid")
+    if not price:
+        return {"error": "価格取得失敗"}
+    size = round(jpy_amount / price, 8)
     ts = str(time.time())
-    method = "GET"
-    path   = "/v1/me/getpositions"
-    text = ts + method + path
-    sign = hmac.new(API_SECRET.encode(), text.encode(), hashlib.sha256).hexdigest()
+    method = "POST"
+    path   = "/v1/me/sendchildorder"
+    body = {
+        "product_code":     "BTC_JPY",
+        "child_order_type": "LIMIT",
+        "side":             side,
+        "price":            int(price),
+        "size":             size,
+        "minute_to_expire": 43200,
+        "time_in_force":    "GTC"
+    }
+    body_json = json.dumps(body)
+    sign = _get_signature(ts, method, path, body_json)
     headers = {
         "ACCESS-KEY":       API_KEY,
         "ACCESS-TIMESTAMP": ts,
         "ACCESS-SIGN":      sign,
         "Content-Type":     "application/json"
     }
-    try:
-        r = requests.get(API_URL + path, headers=headers, timeout=5)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        logging.error(f"get_positions error: {e}")
-        return []
+    resp = requests.post(API_URL + path, headers=headers, data=body_json)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_child_orders(limit: int = 20) -> list:
+    ts = str(time.time())
+    method = "GET"
+    path = f"/v1/me/getchildorders?count={limit}&product_code=BTC_JPY"
+    sign = _get_signature(ts, method, path)
+    headers = {"ACCESS-KEY":API_KEY, "ACCESS-TIMESTAMP":ts, "ACCESS-SIGN":sign}
+    resp = requests.get(API_URL + path, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_executions(limit: int = 100) -> list:
+    ts = str(time.time())
+    method = "GET"
+    path = f"/v1/me/getexecutions?count={limit}&product_code=BTC_JPY"
+    sign = _get_signature(ts, method, path)
+    headers = {"ACCESS-KEY":API_KEY, "ACCESS-TIMESTAMP":ts, "ACCESS-SIGN":sign}
+    resp = requests.get(API_URL + path, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
 
 # ——————————————————————————————————
 # Dash アプリ定義
 # ——————————————————————————————————
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
 app.layout = dbc.Container(fluid=True, children=[
+    html.H1("BitFlyer JPY目標売買 + 履歴 & P/L集計"),
+    dcc.Interval(id="interval", interval=5000, n_intervals=0),
 
-    html.H1("BitFlyer + News + Position Dashboard"),
+    # JPY目標売却／購入ボタン
+    dbc.Button("JPY目標で売却", id="open-sell-jpy-btn", color="danger", className="me-2"),
+    dbc.Button("JPY目標で購入", id="open-buy-jpy-btn", color="success"),
 
-    # 自動更新
-    dcc.Interval(id="interval", interval=3_000, n_intervals=0),
+    # 売却モーダル
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("JPY目標売却")),
+        dbc.ModalBody([
+            dbc.InputGroup([
+                dbc.Input(id="sell-jpy-input", type="number", min=0, placeholder="売却目標 (JPY)"),
+                dbc.InputGroupText("JPY")
+            ], className="mb-2"),
+            html.Div(id="sell-jpy-qty", style={"fontWeight":"bold","marginBottom":"1rem"}),
+            dbc.Button("注文実行", id="sell-jpy-execute-btn", color="primary"),
+            html.Div(id="sell-jpy-result", style={"marginTop":"1rem","color":"green"})
+        ]),
+        dbc.ModalFooter(dbc.Button("閉じる", id="close-sell-jpy-btn", className="ms-auto"))
+    ], id="sell-jpy-modal", is_open=False),
 
-    # ティッカー
-    html.H2("BTC/JPY リアルタイム価格"),
-    html.Div(id="ticker-text", style={"fontWeight":"bold"}),
-    dcc.Graph(id="price-chart"),
+    # 購入モーダル
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("JPY目標購入")),
+        dbc.ModalBody([
+            dbc.InputGroup([
+                dbc.Input(id="buy-jpy-input", type="number", min=0, placeholder="購入目標 (JPY)"),
+                dbc.InputGroupText("JPY")
+            ], className="mb-2"),
+            html.Div(id="buy-jpy-qty", style={"fontWeight":"bold","marginBottom":"1rem"}),
+            dbc.Button("注文実行", id="buy-jpy-execute-btn", color="primary"),
+            html.Div(id="buy-jpy-result", style={"marginTop":"1rem","color":"green"})
+        ]),
+        dbc.ModalFooter(dbc.Button("閉じる", id="close-buy-jpy-btn", className="ms-auto"))
+    ], id="buy-jpy-modal", is_open=False),
 
     html.Hr(),
-
-    # ニュース
-    html.H2("最新ニュース"),
+    html.H2("取引履歴 (直近)"),
     dash_table.DataTable(
-        id="news-table",
+        id="order-history",
         columns=[
-            {"name":"Published At","id":"publishedAt"},
-            {"name":"Title","id":"title"}
-        ],
-        style_cell={"textAlign":"left","whiteSpace":"normal","height":"auto"},
+            {"name":"受付ID","id":"child_order_acceptance_id"},
+            {"name":"売買","id":"side"},
+            {"name":"価格","id":"price"},
+            {"name":"数量","id":"size"},
+            {"name":"状態","id":"child_order_state"},
+            {"name":"約定数","id":"executions"},
+            {"name":"約定額 (JPY)","id":"amount_jpy"}
+        ], page_action="native", page_size=20,
         style_table={"overflowY":"auto","maxHeight":"300px"}
     ),
 
     html.Hr(),
-
-    # シミュレーションモード
-    dbc.Button("シミュレーションモード", id="open-sim-btn", color="warning", className="mb-3"),
-    dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle("シミュレーションモード")),
-        dbc.ModalBody([
-            dbc.InputGroup([
-                dbc.Input(id="sim-invest-jpy", type="number", min=0, placeholder="投資金額 (JPY)"),
-                dbc.InputGroupText("JPY")
-            ], className="mb-2"),
-            dbc.InputGroup([
-                dbc.Input(id="sim-target-jpy", type="number", min=0, placeholder="目標利益 (JPY)"),
-                dbc.InputGroupText("JPY")
-            ], className="mb-2"),
-            html.Div(id="sim-exit-price",
-                     style={"fontWeight":"bold","fontSize":"1.2em","marginTop":"1rem"})
-        ]),
-        dbc.ModalFooter(dbc.Button("閉じる", id="close-sim-btn", className="ms-auto"))
-    ], id="sim-modal", is_open=False),
-
-    html.Hr(),
-
-    # My Positions テーブル
-    html.H2("My Positions"),
-    dash_table.DataTable(
-        id="position-table",
-        columns=[
-            {"name":"Product","id":"product_code"},
-            {"name":"Side","id":"side"},
-            {"name":"Size","id":"size"},
-            {"name":"Entry Price","id":"price"},
-            {"name":"Unrealized P/L","id":"pnl"}
-        ],
-        style_cell={"textAlign":"center"},
-        style_header={"fontWeight":"bold"},
-        style_table={"overflowX":"auto"}
-    ),
-
+    html.H2("実現損益 (JPY)"),
+    html.Div(id="pnl-summary", style={"fontWeight":"bold"})
 ])
 
 # ——————————————————————————————————
-# コールバック: 価格・ニュース・ポジション更新
+# コールバック: モーダル開閉
 # ——————————————————————————————————
 @app.callback(
-    Output("ticker-text","children"),
-    Output("price-chart","figure"),
-    Output("news-table","data"),
-    Output("position-table","data"),
-    Input("interval","n_intervals")
+    Output("sell-jpy-modal","is_open"),
+    [Input("open-sell-jpy-btn","n_clicks"), Input("close-sell-jpy-btn","n_clicks")],
+    [State("sell-jpy-modal","is_open")]
 )
-def update_all(n):
-    # ティッカー取得＆履歴更新
-    tk    = get_ticker()
-    price = tk.get("ltp") or tk.get("best_bid") or None
-    now   = datetime.now()
-    if price is not None:
-        price_times.append(now)
-        price_vals.append(price)
-        if len(price_times)>100:
-            price_times.pop(0); price_vals.pop(0)
+def toggle_sell(o, c, is_open):
+    if o or c:
+        return not is_open
+    return is_open
 
-    txt = f"現在のBTC/JPY: {price:,} 円" if price else "価格取得エラー"
-
-    # チャート作成
-    traces = [{"x":price_times, "y":price_vals, "type":"line", "name":"BTC/JPY"}]
-    layout = {"title":"BTC/JPY Price","margin":{"l":40,"r":20,"t":30,"b":30}}
-    price_fig = {"data":traces, "layout":layout}
-
-    # NewsAPI
-    arts = get_news_events()
-    news_data = [
-        {"publishedAt": art.get("publishedAt","")[:19].replace("T"," "),
-         "title": art.get("title","")}
-        for art in arts
-    ]
-
-    # Positions
-    positions = get_positions()
-    pos_data = []
-    for pos in positions:
-        pos_data.append({
-            "product_code": pos.get("product_code",""),
-            "side":         pos.get("side",""),
-            "size":         pos.get("size",0),
-            "price":        pos.get("price",0),
-            "pnl":          pos.get("pnl",0)
-        })
-
-    return txt, price_fig, news_data, pos_data
-
-# ——————————————————————————————————
-# コールバック: シミュレーションモード開閉
-# ——————————————————————————————————
 @app.callback(
-    Output("sim-modal","is_open"),
-    [Input("open-sim-btn","n_clicks"), Input("close-sim-btn","n_clicks")],
-    [State("sim-modal","is_open")]
+    Output("buy-jpy-modal","is_open"),
+    [Input("open-buy-jpy-btn","n_clicks"), Input("close-buy-jpy-btn","n_clicks")],
+    [State("buy-jpy-modal","is_open")]
 )
-def toggle_sim_modal(open_clicks, close_clicks, is_open):
-    if open_clicks or close_clicks:
+def toggle_buy(o, c, is_open):
+    if o or c:
         return not is_open
     return is_open
 
 # ——————————————————————————————————
-# コールバック: シミュレーション計算
+# コールバック: JPY→BTC量表示
 # ——————————————————————————————————
 @app.callback(
-    Output("sim-exit-price","children"),
-    Input("sim-invest-jpy","value"),
-    Input("sim-target-jpy","value"),
+    Output("sell-jpy-qty","children"),
+    [Input("sell-jpy-input","value"), Input("interval","n_intervals")]
+)
+def sell_qty(jpy, _):
+    if not jpy or jpy <= 0:
+        return "目標JPYを入力してください"
+    price = get_ticker().get("ltp")
+    return f"売却予定: {round(jpy/price,8):.8f} BTC @ {price:,} JPY"
+
+@app.callback(
+    Output("buy-jpy-qty","children"),
+    [Input("buy-jpy-input","value"), Input("interval","n_intervals")]
+)
+def buy_qty(jpy, _):
+    if not jpy or jpy <= 0:
+        return "目標JPYを入力してください"
+    price = get_ticker().get("ltp")
+    return f"購入予定: {round(jpy/price,8):.8f} BTC @ {price:,} JPY"
+
+# ——————————————————————————————————
+# コールバック: 注文実行
+# ——————————————————————————————————
+@app.callback(
+    Output("sell-jpy-result","children"),
+    Input("sell-jpy-execute-btn","n_clicks"),
+    State("sell-jpy-input","value")
+)
+def exec_sell(n, jpy):
+    if not n or not jpy:
+        return ""
+    res = send_childorder_limit(jpy, "SELL")
+    return ("注文成功: " + res.get("child_order_acceptance_id")) if not res.get("error") else f"注文失敗: {res['error']}"
+
+@app.callback(
+    Output("buy-jpy-result","children"),
+    Input("buy-jpy-execute-btn","n_clicks"),
+    State("buy-jpy-input","value")
+)
+def exec_buy(n, jpy):
+    if not n or not jpy:
+        return ""
+    res = send_childorder_limit(jpy, "BUY")
+    return ("注文成功: " + res.get("child_order_acceptance_id")) if not res.get("error") else f"注文失敗: {res['error']}"
+
+# ——————————————————————————————————
+# コールバック: 履歴 & P/L 更新
+# ——————————————————————————————————
+@app.callback(
+    [Output("order-history","data"), Output("pnl-summary","children")],
     Input("interval","n_intervals")
 )
-def update_simulation(invest_jpy, target_jpy, n):
-    if not invest_jpy or invest_jpy <= 0 or target_jpy is None or target_jpy < 0:
-        return "投資金額と目標利益を入力してください。"
-    tk    = get_ticker("BTC_JPY")
-    price = tk.get("ltp") or tk.get("best_bid")
-    if not price:
-        return "価格取得失敗"
-    exit_price = price * (invest_jpy + target_jpy) / invest_jpy
-    return f"売却推奨価格: {exit_price:,.0f} JPY／BTC  (現在価格: {price:,.0f} JPY)"
+def update_history(n):
+    orders = get_child_orders()
+    data = []
+    for o in orders:
+        amt = sum(ex.get("price",0)*ex.get("size",0) for ex in o.get("executions",[]))
+        data.append({
+            "child_order_acceptance_id": o.get("child_order_acceptance_id"),
+            "side": o.get("side"),
+            "price": o.get("price"),
+            "size": o.get("size"),
+            "child_order_state": o.get("child_order_state"),
+            "executions": len(o.get("executions",[])),
+            "amount_jpy": round(amt,0)
+        })
+    exs = get_executions()
+    buy = sum(ex.get("price",0)*ex.get("size",0)+ex.get("commission",0) for ex in exs if ex.get("side")=="BUY")
+    sell = sum(ex.get("price",0)*ex.get("size",0)-ex.get("commission",0) for ex in exs if ex.get("side")=="SELL")
+    comm = sum(ex.get("commission",0) for ex in exs)
+    pnl = sell - buy
+    summary = f"総買付額: {buy:,.0f} JPY ／ 総売却額: {sell:,.0f} JPY ／ 実現損益: {pnl:,.0f} JPY (手数料合計 {comm:,.0f} JPY)"
+    return data, summary
 
 if __name__ == "__main__":
     app.run_server(host="0.0.0.0", port=8050, debug=True)
