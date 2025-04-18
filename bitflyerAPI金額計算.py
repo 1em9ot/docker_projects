@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# app.py — bitFlyer 取引照合 + Dash ダッシュボード（FINAL v4）
+# app.py — bitFlyer 取引照合 + Dash ダッシュボード（FINAL v4 with JPY-match filter）
 # 2025‑04‑18
 
 import os, io, textwrap, logging, hmac, hashlib, time
@@ -90,9 +90,7 @@ def _api(path, params=None):
     ts = str(int(time.time()))
     q  = urlencode(params or {})
     target = f"{path}?{q}" if q else path
-    sign = hmac.new(API_SECRET.encode(),
-                    (ts+"GET"+target).encode(),
-                    hashlib.sha256).hexdigest()
+    sign = hmac.new(API_SECRET.encode(),(ts+"GET"+target).encode(),hashlib.sha256).hexdigest()
     hdr  = {"ACCESS-KEY":API_KEY,"ACCESS-TIMESTAMP":ts,"ACCESS-SIGN":sign}
     try:
         r = requests.get(API_URL+path, params=params, headers=hdr, timeout=10)
@@ -103,99 +101,40 @@ def _api(path, params=None):
         return []
 
 rows, seen = [], set()
+
 def add(row):
     tid = row[-1]
     if tid in seen: return
     seen.add(tid)
     rows.append(row)
-
-# 注意： coin の引数順序は (ts, typ, sym, qty, price, tid)
-#        内部では [ts, typ, price, sym, qty, tid] で格納します
-def coin(ts, typ, sym, qty, price, tid):
-    add([ts, typ, price, sym, qty, tid])
-
-# -- Lightning BTC 約定履歴 --
-before = None
-while True:
-    ex = _api("/v1/me/getexecutions",
-              {"product_code":"BTC_JPY","count":500,
-               **({"before":before} if before else {})})
-    if not ex: break
-    for e in ex:
-        ts  = pd.to_datetime(e["exec_date"])
-        typ = EN2JP.get(e["side"], e["side"])
-        qty = float(e["size"]) if typ=="買い" else -float(e["size"])
-        coin(ts, typ, "BTC", qty, float(e["price"]), str(e["id"]))
-    if len(ex) < 500: break
-    before = ex[-1]["id"]
-
-# -- balancehistory (BTC, ETH, XRP, JPY) --
-def bal(sym):
-    before = None
-    while True:
-        bh = _api("/v1/me/getbalancehistory",
-                  {"currency_code":sym,"count":500,
-                   **({"before":before} if before else {})})
-        if not bh: break
-        for e in bh:
-            ts = pd.to_datetime(e.get("trade_date") or e.get("event_date"))
-            kind = e.get("trade_type")
-            # FEE → 出金手数料
-            if kind == "FEE":
-                typ_jp = "出金手数料"
-            else:
-                typ_jp = EN2JP.get(kind, kind)
-            tid = str(e["id"])
-
-            # --- (A) 買い／売り --- 
-            if typ_jp in ("買い","売り"):
-                q = float(e["quantity"])
-                q = q if typ_jp=="買い" else -q
-                p = float(e["price"])
-                coin(ts, typ_jp, sym, q, p, tid)
-
-            # --- (B) JPY の入金／出金／手数料 は符号反転 ---
-            elif sym == "JPY" and typ_jp in ("入金","出金","出金手数料"):
-                amt = float(e["amount"])
-                coin(ts, typ_jp, "JPY", amt, 0, tid)
-
-        if len(bh) < 500: break
-        before = bh[-1]["id"]
-
-for c in ("BTC","ETH","XRP","JPY"):
-    bal(c)
-
 # ---------- 4. DataFrame 化 & フィルタリング ----------
-api = pd.DataFrame(rows,
-                   columns=["取引日時","取引種別","価格","通貨1","数量1","注文ID"])
-api[["価格","数量1"]] = api[["価格","数量1"]].apply(
-    pd.to_numeric, errors="coerce"
-)
+# API取得データをDataFrame化
+api = pd.DataFrame(rows, columns=["取引日時","取引種別","価格","通貨1","数量1","注文ID"])
+# 取引日時をdatetime型に変換
+api["取引日時"] = pd.to_datetime(api["取引日時"])
+api[["価格","数量1"]] = api[["価格","数量1"]].apply(pd.to_numeric, errors="coerce")
 api["種別EN"] = api["取引種別"].map(JP2EN).fillna(api["取引種別"])
-# --- (1) Lightning 子注文に紐づく「JPY の買い/売り」を完全に除去 ---
-api = api[~((api["通貨1"] == "JPY") &
-            api["取引種別"].isin(["買い","売り"]))]
-# --- (2) Key を作成し、重複エントリをまとめて一意化 ---
-api["key"] = api.apply(
-    lambda r: f"{r['取引日時']:%F %T}|{r['種別EN']}|{r['通貨1']}|{r['数量1']}",
-    axis=1
-)
+# Lightning子注文に紐づく「JPYの買い/売り」を除外
+api = api[~((api["通貨1"] == "JPY") & api["取引種別"].isin(["買い","売り"]))]
+# 重複キーで一意化
+# 一意化キーをベクトル化で生成
+api["key"] = api["取引日時"].dt.strftime("%F %T") + "|" + api["種別EN"] + "|" + api["通貨1"] + "|" + api["数量1"].astype(str)
+
 api = api.drop_duplicates(subset="key")
+# API側の子注文除外ロジック
+api["ts_jst"] = api["取引日時"] + pd.Timedelta(hours=9)
+api["ts_jst"] = api["ts_jst"].dt.floor("S")
+# 同一日時・数量・売買のJPYレコードを抽出
+jpy = api[(api["通貨1"] == "JPY") & api["取引種別"].isin(["買い","売り"])]
+jpy_keys = set(zip(jpy["ts_jst"], jpy["取引種別"], jpy["数量1"]))
+# 通貨がJPYでないエントリでJPYキーにマッチするものを除外
+api = api[~((api["通貨1"] != "JPY") & api.apply(lambda r: (r["ts_jst"], r["取引種別"], r["数量1"]) in jpy_keys, axis=1))]
 
 # ---------- 5. 突合 ----------
 merged = fixed.merge(api[["key"]], on="key", how="outer", indicator=True)
 print("\n=== 突合サマリ ===")
-print(tabulate(merged["_merge"].value_counts().reset_index(),
-               headers=["状態","件数"], tablefmt="github"))
+print(tabulate(merged["_merge"].value_counts().reset_index(), headers=["状態","件数"], tablefmt="github"))
 
-lft = merged.query("_merge=='left_only'")
-rgt = merged.query("_merge=='right_only'")
-if not lft.empty:
-    print("\n--- 手入力のみ ---")
-    print(tabulate(lft["key"].to_frame(), headers=["key"], tablefmt="github"))
-if not rgt.empty:
-    print("\n--- API のみ ---")
-    print(tabulate(rgt["key"].to_frame(), headers=["key"], tablefmt="github"))
 
 # ---------- 6. Dash ダッシュボード ----------
 def ticker_price(sym):
@@ -224,4 +163,4 @@ app.layout = dbc.Container([
 ], fluid=True)
 
 if __name__ == "__main__":
-    print("\nDash → http://127.0.0.1:8050/")
+    print("\nDash → http://127.0.0.1:8050/")  
