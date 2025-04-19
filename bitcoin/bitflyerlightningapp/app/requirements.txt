@@ -1,5 +1,12 @@
 dash==2.11.1
+dash-bootstrap-components==1.4.1
 requests==2.31.0
-dash_bootstrap_components==1.4.1
 pandas
 ccxt
+ta
+scipy
+scikit-learn
+dowhy
+econml
+causalml
+shap
