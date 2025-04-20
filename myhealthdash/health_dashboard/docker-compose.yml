@@ -1,0 +1,28 @@
+version: '3.8'
+services:
+  app:
+    build: .
+    container_name: health_dashboard
+    ports:
+      - "8060:8060"
+    volumes:
+      - "/home/user/docker_projects/myhealthdash/teacher_data:/myhealth/teacher_data"
+      - "./models:/myhealth/models"
+      - "./data:/myhealth/data"
+      - "./dashboard:/myhealth/dashboard"
+    environment:
+      DB_HOST: "pleasanter_postgres"
+      DB_PORT: "5432"
+      DB_NAME: "Implem.Pleasanter"
+      DB_USER: "postgres"
+      DB_PASS: "MyStrongPostgresPass!"
+      SITE_ID: "3"
+      STAYFREE_DIR: "/myhealth/teacher_data/stayfree_exports"
+      TWITTER_DIR: "/myhealth/teacher_data/twitter_exports"
+      MODEL_DIR: "/myhealth/models"
+    networks:
+      - pleasanter-net
+networks:
+  pleasanter-net:
+    external: true
+    name: pleasanterDocker_default

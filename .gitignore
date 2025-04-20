@@ -9,3 +9,5 @@ __init__.py
 .env
 /bitcoin/.env
 /bitcoin/trade/.env
+
+/health_dashboard/teacher_data/*

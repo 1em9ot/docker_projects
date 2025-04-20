@@ -1,0 +1,9 @@
+dash
+pandas
+numpy
+scikit-learn
+psycopg2-binary
+python-dotenv
+textblob
+plotly
+plotly-calplot

@@ -79,6 +79,8 @@ services:
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "MyStrongPostgresPass!"
       POSTGRES_DB: "postgres"
+    ports:
+      - "5432:5432"      #外部疎通用バインド
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
