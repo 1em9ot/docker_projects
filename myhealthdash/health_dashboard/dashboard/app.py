@@ -3,6 +3,7 @@ import os
 import sys
 import json
 from datetime import datetime
+
 import pandas as pd
 import collections
 from pandas.api.types import is_scalar
@@ -25,28 +26,45 @@ from strategies.predict import predict
 
 def sanitize_records(df: pd.DataFrame):
     """
-    DataTable用に各セルをJSON-シリアライズし、NaNを空文字に変換。
-    非スカラー型(配列など)も安全に文字列化します。
+    DataTable用に各セルをJSON-シリアライズし、
+    NaNを空文字に、配列やシリーズにも安全に対応します。
     """
     records = []
     for row in df.to_dict('records'):
         new_row = {}
         for k, v in row.items():
-            # リストや辞書はJSON文字列に変換
-            if isinstance(v, (list, dict)):
+            # 1) 全体が NA の場合（配列もスカラーも含む）
+            try:
+                na_mask = pd.isna(v)
+                # 配列やシリーズなら all() で全要素NA判定
+                if hasattr(na_mask, 'all') and na_mask.all():
+                    new_row[k] = ''
+                    continue
+                # 単一値の場合はそのまま bool
+                if isinstance(na_mask, bool) and na_mask:
+                    new_row[k] = ''
+                    continue
+            except Exception:
+                # pd.isna で例外が出たら無視して次へ
+                pass
+
+            # 2) dict や list は JSON 文字列に変換
+            if isinstance(v, (dict, list)):
                 new_row[k] = json.dumps(v, ensure_ascii=False)
-            # 非スカラーはtolist()可能ならリスト化、不可なら文字列化
-            elif not is_scalar(v):
+                continue
+
+            # 3) numpy array や pandas Series, その他の非スカラー
+            if not is_scalar(v):
                 try:
-                    serializable = v.tolist() if hasattr(v, 'tolist') else v
-                    new_row[k] = json.dumps(serializable, ensure_ascii=False)
+                    seq = v.tolist() if hasattr(v, 'tolist') else list(v)
+                    new_row[k] = json.dumps(seq, ensure_ascii=False)
                 except Exception:
                     new_row[k] = str(v)
-            # スカラーかつNaNなら空文字
-            elif pd.isna(v):
-                new_row[k] = ''
-            else:
-                new_row[k] = v
+                continue
+
+            # 4) 上記以外はそのまま保持
+            new_row[k] = v
+
         records.append(new_row)
     return records
 
@@ -65,12 +83,17 @@ def cluster_emotion_keywords(df: pd.DataFrame, top_k=50):
     words = vectorizer.get_feature_names_out()
 
     # KMeansで3クラスタ
-    labels = KMeans(n_clusters=3, n_init='auto', random_state=42).fit_predict(word_counts.reshape(-1, 1))
+    labels = KMeans(n_clusters=3, n_init='auto', random_state=42).fit_predict(
+        word_counts.reshape(-1, 1)
+    )
     clusters = collections.defaultdict(list)
     for w, lbl in zip(words, labels):
         clusters[lbl].append(w)
-    # 暫定的にmapping
-    return {'anger': clusters.get(0, []), 'sad': clusters.get(1, []), 'calm': clusters.get(2, [])}
+    return {
+        'anger': clusters.get(0, []),
+        'sad':   clusters.get(1, []),
+        'calm':  clusters.get(2, [])
+    }
 
 
 def classify_emotion(text: str, emotion_dict: dict) -> str:
@@ -88,14 +111,18 @@ def classify_emotion(text: str, emotion_dict: dict) -> str:
 
 def generate_wordcloud_image(df: pd.DataFrame) -> str:
     """
-    Twitter投稿の語彙からワードクラウド画像を生成し、base64データURLを返す
+    Twitter投稿の語彙からワードクラウド画像を生成し、
+    base64データURLを返す
     """
     df_tw = df[df['title'].str.contains("Twitter", na=False)]
     if df_tw.empty:
         return None
     text = ' '.join(df_tw['content'].dropna().astype(str).tolist())
-    wc = WordCloud(width=800, height=400, background_color='white',
-                   font_path='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
+    wc = WordCloud(
+        width=800, height=400,
+        background_color='white',
+        font_path='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+    )
     img = wc.generate(text)
     buf = BytesIO()
     img.to_image().save(buf, format='PNG')
@@ -115,33 +142,53 @@ def main():
     table = sanitize_records(df)
 
     # テーブルのスタイル
-    colors = {'anger':'#ffcccc','sad':'#cce5ff','calm':'#ccffcc','neutral':'#ffffff'}
+    colors = {'anger': '#ffcccc', 'sad': '#cce5ff', 'calm': '#ccffcc', 'neutral': '#ffffff'}
     style_cond = [
-        {'if':{'filter_query':f'{{emotion}} = "{emo}"','column_id':'content'},
-         'backgroundColor':col}
-        for emo,col in colors.items()
+        {
+            'if': {'filter_query': f'{{emotion}} = "{emo}"', 'column_id': 'content'},
+            'backgroundColor': col
+        }
+        for emo, col in colors.items()
     ]
 
-    # 月別エナジーバー
+    # 日ごとのエナジーバー
     df['date'] = pd.to_datetime(df['date'])
     last_m = int(df['date'].dt.month.max())
-    df_m = df[df['date'].dt.month==last_m].copy()
+    df_m = df[df['date'].dt.month == last_m].copy()
     df_m['day'] = df_m['date'].dt.day
     bar = df_m.groupby('day')['pred_energy'].mean().reset_index()
-    fig_bar = px.bar(bar,x='day',y='pred_energy',labels={'day':'Day','pred_energy':'Energy'},
-                      title=f'Month {last_m} Daily Energy',range_y=[bar['pred_energy'].min(),bar['pred_energy'].max()])
+    fig_bar = px.bar(
+        bar,
+        x='day', y='pred_energy',
+        labels={'day': 'Day', 'pred_energy': 'Energy'},
+        title=f'Month {last_m} Daily Energy',
+        range_y=[bar['pred_energy'].min(), bar['pred_energy'].max()]
+    )
 
-    # カレンダーヒート
+    # カレンダーヒートマップ
     try:
         import plotly_calplot
         cal = df_m.copy()
-        cal['date']=cal['date'].dt.floor('D')
+        cal['date'] = cal['date'].dt.floor('D')
         cal = cal.groupby('date')['pred_energy'].mean().reset_index()
-        fig_cal = plotly_calplot.calplot(cal,x='date',y='pred_energy',colorscale='RdYlGn',gap=1,showscale=True)
-    except:
-        piv = df.pivot_table(index=df['date'].dt.month,columns=df['date'].dt.day,values='pred_energy',aggfunc='mean')
-        fig_cal=px.imshow(piv,origin='lower',labels={'color':'Energy'},title='Heatmap')
+        fig_cal = plotly_calplot.calplot(
+            cal, x='date', y='pred_energy',
+            colorscale='RdYlGn', gap=1, showscale=True
+        )
+    except ImportError:
+        piv = df.pivot_table(
+            index=df['date'].dt.month,
+            columns=df['date'].dt.day,
+            values='pred_energy',
+            aggfunc='mean'
+        )
+        fig_cal = px.imshow(
+            piv, origin='lower',
+            labels={'color': 'Energy'},
+            title='Heatmap'
+        )
 
+    # ワードクラウド画像の取得
     wc_url = generate_wordcloud_image(df)
 
     app = dash.Dash(__name__)
@@ -151,20 +198,23 @@ def main():
         dcc.Graph(figure=fig_cal),
         html.H2("Raw Entries"),
         dash_table.DataTable(
-            columns=[{'name':c,'id':c} for c in df.columns],
+            columns=[{'name': c, 'id': c} for c in df.columns],
             data=table,
             page_size=10,
-            style_table={'overflowX':'auto'},
-            style_cell={'textAlign':'left','padding':'4px'},
-            style_header={'backgroundColor':'#f0f0f0','fontWeight':'bold'},
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left', 'padding': '4px'},
+            style_header={'backgroundColor': '#f0f0f0', 'fontWeight': 'bold'},
             style_data_conditional=style_cond
         ),
         html.H2("Twitter Word Cloud"),
-        html.Img(src=wc_url,style={'width':'100%','maxHeight':'400px','objectFit':'contain'})
-        if wc_url else html.P("No Twitter data available")
-    ],style={'padding':'20px'})
+        html.Img(
+            src=wc_url,
+            style={'width': '100%', 'maxHeight': '400px', 'objectFit': 'contain'}
+        ) if wc_url else html.P("No Twitter data available")
+    ], style={'padding': '20px'})
 
-    app.run(host='0.0.0.0',port=8060,debug=True)
+    app.run(host='0.0.0.0', port=8060, debug=True)
 
-if __name__=='__main__':
+
+if __name__ == '__main__':
     main()
