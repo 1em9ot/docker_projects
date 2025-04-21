@@ -396,14 +396,22 @@ if __name__=='__main__':
 EOF
 
 # 2-14. entrypoint.sh
-cat > entrypoint.sh << 'EOF'
+# entrypoint.sh を書き出し
+cat > entrypoint.sh <<'EOF'
 #!/bin/sh
 set -e
+export MPLCONFIGDIR=/tmp/.matplotlib
+mkdir -p "$MPLCONFIGDIR"
+
 echo "▶ Running train.py..."
 python /myhealth/strategies/train.py
+
 echo "▶ Starting Dash..."
 exec python /myhealth/dashboard/app.py
 EOF
+
+# CR(\r) を除去して実行権限を付与
+sed -i 's/\r$//' entrypoint.sh
 chmod +x entrypoint.sh
 
 # 2-15. Dockerfile

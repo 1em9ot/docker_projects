@@ -27,33 +27,28 @@ from strategies.predict import predict
 def sanitize_records(df: pd.DataFrame):
     """
     DataTable用に各セルをJSON-シリアライズし、
-    NaNを空文字に、配列やシリーズにも安全に対応します。
+    NAは空文字に、配列やシリーズにも安全に対応します。
     """
     records = []
     for row in df.to_dict('records'):
         new_row = {}
         for k, v in row.items():
-            # 1) 全体が NA の場合（配列もスカラーも含む）
+            # 全体がNAか判定（配列はall(), 単一値はbool）
             try:
                 na_mask = pd.isna(v)
-                # 配列やシリーズなら all() で全要素NA判定
                 if hasattr(na_mask, 'all') and na_mask.all():
                     new_row[k] = ''
                     continue
-                # 単一値の場合はそのまま bool
                 if isinstance(na_mask, bool) and na_mask:
                     new_row[k] = ''
                     continue
             except Exception:
-                # pd.isna で例外が出たら無視して次へ
                 pass
-
-            # 2) dict や list は JSON 文字列に変換
+            # dict/listをJSON化
             if isinstance(v, (dict, list)):
                 new_row[k] = json.dumps(v, ensure_ascii=False)
                 continue
-
-            # 3) numpy array や pandas Series, その他の非スカラー
+            # 非スカラーをtolist()→JSON
             if not is_scalar(v):
                 try:
                     seq = v.tolist() if hasattr(v, 'tolist') else list(v)
@@ -61,68 +56,44 @@ def sanitize_records(df: pd.DataFrame):
                 except Exception:
                     new_row[k] = str(v)
                 continue
-
-            # 4) 上記以外はそのまま保持
+            # その他はそのまま
             new_row[k] = v
-
         records.append(new_row)
     return records
 
 
 def cluster_emotion_keywords(df: pd.DataFrame, top_k=50):
-    """
-    Twitter投稿から頻出単語を抽出し、3クラスタに分けてemotionカテゴリ語彙を生成
-    """
     df_tw = df[df['title'].str.contains("Twitter", na=False)]
     if df_tw.empty:
         return {'anger': [], 'sad': [], 'calm': []}
     texts = df_tw['content'].dropna().astype(str)
-    vectorizer = CountVectorizer(token_pattern=r'(?u)\b\w+\b', max_features=top_k)
-    X = vectorizer.fit_transform(texts)
-    word_counts = X.toarray().sum(axis=0)
-    words = vectorizer.get_feature_names_out()
-
-    # KMeansで3クラスタ
-    labels = KMeans(n_clusters=3, n_init='auto', random_state=42).fit_predict(
-        word_counts.reshape(-1, 1)
-    )
-    clusters = collections.defaultdict(list)
-    for w, lbl in zip(words, labels):
-        clusters[lbl].append(w)
-    return {
-        'anger': clusters.get(0, []),
-        'sad':   clusters.get(1, []),
-        'calm':  clusters.get(2, [])
-    }
+    cnt = CountVectorizer(token_pattern=r'(?u)\b\w+\b', max_features=top_k)
+    X = cnt.fit_transform(texts)
+    words = cnt.get_feature_names_out()
+    counts = X.toarray().sum(axis=0).reshape(-1, 1)
+    labels = KMeans(n_clusters=3, random_state=42).fit_predict(counts)
+    clusters = {i: [] for i in range(3)}
+    for w, l in zip(words, labels):
+        clusters[l].append(w)
+    return {'anger': clusters[0], 'sad': clusters[1], 'calm': clusters[2]}
 
 
-def classify_emotion(text: str, emotion_dict: dict) -> str:
-    """
-    テキスト中にemotion_dict内の単語があれば該当ラベルを返す
-    """
+def classify_emotion(text: str, emo_dict: dict) -> str:
     if not isinstance(text, str):
         return 'neutral'
-    for label, words in emotion_dict.items():
-        for w in words:
-            if w and w in text:
-                return label
+    for label, words in emo_dict.items():
+        if any(w in text for w in words):
+            return label
     return 'neutral'
 
 
 def generate_wordcloud_image(df: pd.DataFrame) -> str:
-    """
-    Twitter投稿の語彙からワードクラウド画像を生成し、
-    base64データURLを返す
-    """
     df_tw = df[df['title'].str.contains("Twitter", na=False)]
     if df_tw.empty:
         return None
     text = ' '.join(df_tw['content'].dropna().astype(str).tolist())
-    wc = WordCloud(
-        width=800, height=400,
-        background_color='white',
-        font_path='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
-    )
+    wc = WordCloud(width=800, height=400, background_color='white',
+                   font_path='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
     img = wc.generate(text)
     buf = BytesIO()
     img.to_image().save(buf, format='PNG')
@@ -136,59 +107,41 @@ def main():
         print("No data available to display.")
         return
 
-    # 感情辞書を生成・適用
     emo_dict = cluster_emotion_keywords(df)
     df['emotion'] = df['content'].apply(lambda t: classify_emotion(t, emo_dict))
     table = sanitize_records(df)
 
-    # テーブルのスタイル
-    colors = {'anger': '#ffcccc', 'sad': '#cce5ff', 'calm': '#ccffcc', 'neutral': '#ffffff'}
+    colors = {'anger':'#ffcccc','sad':'#cce5ff','calm':'#ccffcc','neutral':'#ffffff'}
     style_cond = [
-        {
-            'if': {'filter_query': f'{{emotion}} = "{emo}"', 'column_id': 'content'},
-            'backgroundColor': col
-        }
+        {'if':{'filter_query':f'{{emotion}} = "{emo}"','column_id':'content'},
+         'backgroundColor':col}
         for emo, col in colors.items()
     ]
 
-    # 日ごとのエナジーバー
     df['date'] = pd.to_datetime(df['date'])
     last_m = int(df['date'].dt.month.max())
     df_m = df[df['date'].dt.month == last_m].copy()
-    df_m['day'] = df_m['date'].dt.day
+    df_m.loc[:, 'day'] = df_m['date'].dt.day
     bar = df_m.groupby('day')['pred_energy'].mean().reset_index()
-    fig_bar = px.bar(
-        bar,
-        x='day', y='pred_energy',
-        labels={'day': 'Day', 'pred_energy': 'Energy'},
-        title=f'Month {last_m} Daily Energy',
-        range_y=[bar['pred_energy'].min(), bar['pred_energy'].max()]
-    )
+    fig_bar = px.bar(bar, x='day', y='pred_energy',
+                      labels={'day':'Day','pred_energy':'Energy'},
+                      title=f'Month {last_m} Daily Energy',
+                      range_y=[bar['pred_energy'].min(), bar['pred_energy'].max()])
 
-    # カレンダーヒートマップ
     try:
         import plotly_calplot
         cal = df_m.copy()
         cal['date'] = cal['date'].dt.floor('D')
         cal = cal.groupby('date')['pred_energy'].mean().reset_index()
-        fig_cal = plotly_calplot.calplot(
-            cal, x='date', y='pred_energy',
-            colorscale='RdYlGn', gap=1, showscale=True
-        )
+        fig_cal = plotly_calplot.calplot(cal, x='date', y='pred_energy',
+                                         colorscale='RdYlGn', gap=1, showscale=True)
     except ImportError:
-        piv = df.pivot_table(
-            index=df['date'].dt.month,
-            columns=df['date'].dt.day,
-            values='pred_energy',
-            aggfunc='mean'
-        )
-        fig_cal = px.imshow(
-            piv, origin='lower',
-            labels={'color': 'Energy'},
-            title='Heatmap'
-        )
+        piv = df.pivot_table(index=df['date'].dt.month,
+                              columns=df['date'].dt.day,
+                              values='pred_energy',
+                              aggfunc='mean')
+        fig_cal = px.imshow(piv, origin='lower', labels={'color':'Energy'}, title='Heatmap')
 
-    # ワードクラウド画像の取得
     wc_url = generate_wordcloud_image(df)
 
     app = dash.Dash(__name__)
@@ -198,23 +151,21 @@ def main():
         dcc.Graph(figure=fig_cal),
         html.H2("Raw Entries"),
         dash_table.DataTable(
-            columns=[{'name': c, 'id': c} for c in df.columns],
+            columns=[{'name':c,'id':c} for c in df.columns],
             data=table,
             page_size=10,
-            style_table={'overflowX': 'auto'},
-            style_cell={'textAlign': 'left', 'padding': '4px'},
-            style_header={'backgroundColor': '#f0f0f0', 'fontWeight': 'bold'},
+            style_table={'overflowX':'auto'},
+            style_cell={'textAlign':'left','padding':'4px'},
+            style_header={'backgroundColor':'#f0f0f0','fontWeight':'bold'},
             style_data_conditional=style_cond
         ),
         html.H2("Twitter Word Cloud"),
-        html.Img(
-            src=wc_url,
-            style={'width': '100%', 'maxHeight': '400px', 'objectFit': 'contain'}
-        ) if wc_url else html.P("No Twitter data available")
-    ], style={'padding': '20px'})
+        html.Img(src=wc_url, style={'width':'100%','maxHeight':'400px','objectFit':'contain'})
+        if wc_url else html.P("No Twitter data available")
+    ], style={'padding':'20px'})
 
     app.run(host='0.0.0.0', port=8060, debug=True)
 
 
-if __name__ == '__main__':
+if __name__=='__main__':
     main()
