@@ -361,3 +361,7 @@ INFO:root:SHAP mean contributions: [[-0.00376621  0.00343562  0.00207695]
  [ 0.00376621 -0.00343562 -0.00207695]]
 INFO:root:SHAP mean contributions: [[-0.00275481  0.0029345   0.00162904]
  [ 0.00275481 -0.0029345  -0.00162904]]
+INFO:root:Starting BTC causal & explainable dashboard
+INFO:dash.dash:Dash is running on http://0.0.0.0:8050/
+
+INFO:root:Starting BTC causal & explainable dashboard

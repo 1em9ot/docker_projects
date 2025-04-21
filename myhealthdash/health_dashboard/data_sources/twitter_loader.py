@@ -1,63 +1,102 @@
 #!/usr/bin/env python3
+"""
+Twitter エクスポート ZIP から tweets.js / tweets‑part*.js を抽出し、
+Dash で使いやすい 4 列（date / content / title / created_at）を返すローダー。
+"""
+
 import os
 import sys
 import zipfile
 import json
+import re
 from datetime import datetime
 
 import pandas as pd
 
-# プロジェクトルートをインポートパスに追加
+# ── パス設定 ─────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
 
+# tweets.js / tweets-partN.js を検出する正規表現
+PAT_JS = re.compile(r'(?:^|/)tweets?(-part\d+)?\.js$', re.I)
 
+# created_at の代表的なフォーマット
+DT_FMT = "%a %b %d %H:%M:%S %z %Y"   # 例: Tue Mar 18 08:07:10 +0000 2025
+
+
+# ── ヘルパ関数 ─────────────────────────────────────
+def _strip_wrapper(raw: str) -> str:
+    """window.YTD ... = [...] ; というヘッダを外して JSON 部分だけ返す"""
+    return raw.partition('=')[-1].strip().rstrip(';') if raw.lstrip().startswith('window.YTD') else raw
+
+
+def _pick_first(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """候補のうち DataFrame に存在する最初の列名を返す（無ければ None）"""
+    return next((c for c in candidates if c in df.columns), None)
+
+
+# ── メイン関数 ─────────────────────────────────────
 def load_twitter_data() -> pd.DataFrame:
     """
-    Twitter 公式エクスポート（ZIP 形式）から tweet.js を抽出し、
-    日付と本文だけの DataFrame を返す。
-    Dash 側のフィルタで使うため title='Twitter' 列を付与する。
+    teacher_data/twitter_exports 配下の ZIP をすべて走査し、
+    tweets.js / tweets-part*.js を読み込んで DataFrame を返す。
+    取得列:
+        - date         : 日付（0時正規化）
+        - content      : ツイート本文
+        - title        : 'Twitter' 固定（Dash のフィルタ用）
+        - created_at   : 元の投稿日付 (datetime64[ns, UTC])
+    行が 0 件なら空 DataFrame を返す。
     """
-    data_dir = os.getenv('TWITTER_DIR', './teacher_data/twitter_exports')
-    if not os.path.isdir(data_dir):
+    root = os.getenv('TWITTER_DIR', './teacher_data/twitter_exports')
+    if not os.path.isdir(root):
         return pd.DataFrame()
 
-    all_tweets = []
-    for fname in os.listdir(data_dir):
-        if not fname.lower().endswith('.zip'):
-            continue
-        zip_path = os.path.join(data_dir, fname)
+    tweets: list[dict] = []
+
+    # ZIP → tweets*.js を抽出
+    for zname in filter(lambda f: f.lower().endswith('.zip'), os.listdir(root)):
+        zpath = os.path.join(root, zname)
+        with zipfile.ZipFile(zpath) as zf:
+            for member in filter(PAT_JS.search, zf.namelist()):
+                raw = zf.read(member).decode('utf-8', errors='ignore')
+                try:
+                    tweets.extend(json.loads(_strip_wrapper(raw)))
+                except json.JSONDecodeError as e:
+                    print(f"[twitter_loader] JSON decode error in {member}: {e}")
+
+    if not tweets:
+        return pd.DataFrame()
+
+    # フラット化
+    df = pd.json_normalize(tweets)
+
+    # ── created_at / date 列作成 ──────────────────
+    created_col = _pick_first(df, ['created_at', 'tweet.created_at', 'legacy.created_at'])
+    if created_col:
         try:
-            with zipfile.ZipFile(zip_path) as zp:
-                # Twitter エクスポートは tweet.js / tweet_activity.js などが入っている
-                for member in zp.namelist():
-                    if member.endswith('tweet.js'):
-                        raw = zp.read(member).decode('utf-8')
-                        # ファイルは "window.YTD.tweet.part0 = [ {...} ];" 形式なので = 以降を JSON とみなす
-                        js = raw.partition('=')[-1].strip().rstrip(';')
-                        all_tweets.extend(json.loads(js))
-        except Exception as e:
-            # 壊れた ZIP はスキップ
-            print(f"[twitter_loader] skip {zip_path}: {e}")
-            continue
-
-    if not all_tweets:
-        return pd.DataFrame()
-
-    df = pd.json_normalize(all_tweets)
-
-    # 日付パース
-    if 'created_at' in df.columns:
-        df['created_at'] = df['created_at'].apply(
-            lambda x: datetime.strptime(x, "%a %b %d %H:%M:%S %z %Y")
-            if isinstance(x, str) else pd.NaT
-        )
+            df['created_at'] = pd.to_datetime(df[created_col], format=DT_FMT, errors='coerce')
+        except Exception:
+            # フォーマット非一致は個別パースへフォールバック
+            df['created_at'] = pd.to_datetime(df[created_col], errors='coerce')
         df['date'] = df['created_at'].dt.normalize()
 
-    # 本文列 (full_text or text)
-    df.rename(columns={'full_text': 'content', 'text': 'content'}, inplace=True)
+    # ── content 列作成 ────────────────────────────
+    content_col = _pick_first(
+        df,
+        [
+            'content', 'full_text', 'text',
+            'tweet.content', 'tweet.full_text', 'tweet.text',
+            'legacy.content', 'legacy.full_text', 'legacy.text',
+        ]
+    )
+    if not content_col:
+        # object 型列のうち最初を本文に充当（最後の保険）
+        content_col = next((c for c in df.columns if df[c].dtype == object), None)
+    if content_col:
+        df['content'] = df[content_col]
 
     # Dash 側フィルタ用
     df['title'] = 'Twitter'
 
-    return df
+    # 不要列を落として返す
+    return df[['date', 'content', 'title', 'created_at']].copy()
