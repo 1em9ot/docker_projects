@@ -37,4 +37,5 @@ def predict():
     pred = model.predict(X)
     df['pred_sentiment'] = pred
     df['pred_energy'] = pred
+    df['energy_state'] = df['pred_energy'].apply(lambda x: 'Active' if x >= 0 else 'Low')
     return df

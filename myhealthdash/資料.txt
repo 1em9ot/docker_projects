@@ -1,0 +1,1299 @@
+えっと口頭で答えていくねええ教師データの作り方だがええstay freeから起床就寝使用時間を抽出***れはそれで構わないそれからTwitterの投稿数や時間帯ワード頻度特徴量として抽出これも構わないそれからエネルギーに関するラベル付けを行いたいという理解で合ってますでこのラベル付けについてそのまあえっと自動的にstay freeやTwitter活動から定義するで構いません一ベースだったりクラスタリングだったりモデルだったりそのそこは自由に任せるしどんな賞を使っても構いませんで分類モデルの目的ですがえっとおっしゃる通りプリザンターの投稿に対して今日はパワー不足活動的な分類予測したいというのであってますでアウトプットとしてはえっとすべてを実装したえっとクcreateドットSHの形でもらえるとありがたいかな
+
+
+ChatGPT:
+了解！StayFree と Twitter のデータを元に、活動量・使用パターンなどから自動でエネルギー（感情強度）ラベルを生成し、それを使って Pleasanter 投稿のエネルギーレベルを分類・予測する教師付きモデルを構築します。結果は create.sh 形式の完全自動セットアップスクリプトとして出力します。少々お時間ください。できあがったらお知らせします！
+
+Research completed in 26m· 8 件の情報源
+健康ダッシュボード：ユーザー活動エネルギーの推定
+問題の概要
+ユーザーのスマートフォン利用データ（StayFreeアプリのログ）およびTwitter投稿履歴から活動量や利用パターンを特徴量として抽出し、各日ごとの「エネルギーレベル」（感情的な強度や活力の程度）を自動的に推定します。具体的には、外部データからその日の「パワー状態」（活動的か低調か）をラベル付けし、それを教師データとしてPleasanterの日誌投稿（テキストと日付）から日次のパワー状態を分類する機械学習モデルを構築します。最終的に、Dashによるダッシュボード上で日々のエネルギー状態をバーチャートやカレンダー形式のヒートマップで可視化します。 このアプローチにより、ユーザーが主観的にラベル付けしなくても、スマホの利用傾向やSNS投稿内容から自動的に活力状態を推定できます。研究例として、スマホの使用履歴やコミュニケーションパターンからユーザーの気分や活動度を66～93%の精度で当てる試み（MoodScope）も報告されており​
+yecl.org
+、デジタル行動データをクラスタリングしてユーザー状態を分類する手法は有望とされています​
+pmc.ncbi.nlm.nih.gov
+。さらに、Twitter投稿の内容や時間帯から集団の気分リズムを追跡できることも示されています​
+techxplore.com
+。本プロジェクトでは、こうした知見を活かし、ユーザー個人のデータに基づいて日々のエネルギー状態を推定・可視化します。
+データソースと特徴量抽出
+1. StayFreeアプリ利用ログ（CSV） – スマホの利用傾向を把握するデータです。日付ごとに起床時間/就寝時間の推定や総画面使用時間、アプリ使用の頻度（起動回数）などを特徴量として抽出します。具体的には、各日のスマホ利用セッションから以下の指標を計算します:
+総使用時間（分）: その日スマホを使用した合計時間（複数アプリの合計）。
+起動回数（頻度）: アプリを起動した総回数（画面を開いた頻度）。
+深夜使用の有無: 深夜（例: 0時～5時）に使用があったかどうかによる睡眠中断の指標。
+利用アプリ数: その日に使用した異なるアプリの種類数（活動の多様性指標）。
+これらの特徴から、一般に使用時間や頻度が多い＝活動的、深夜遅くまで使用＝翌日低調の可能性などの関連を想定します。例えば、MoodScopeの研究でも通話やアプリ使用パターンから日ごとの活発度（activeness）を推定できることが示されています​
+yecl.org
+。 2. Twitter投稿データ（ZIP） – ユーザーのTwitter投稿履歴を解析し、その日の投稿数や投稿時間帯、内容の感情傾向を特徴量とします。各日のツイート群から以下を抽出します:
+投稿件数: 日ごとのツイート数（発信量の指標）。
+平均投稿時間: 投稿時刻の傾向（朝型か夜型か）。必要に応じて深夜帯の投稿有無も特徴化。
+投稿内容のセンチメント: ツイート本文の平均感情極性（TextBlobによるポジティブ/ネガティブ判定）​
+techxplore.com
+。
+感情表現の頻度: 感嘆符「!」や絵文字など感情の強さを示す表現の出現数。例えば「!」の数は興奮度合いを反映すると考えられます。
+Twitterデータからはその日どれだけ積極的・感情的な発信をしていたかを捉えます。実際、大規模な分析から人々のツイートには日周期・週周期で感情のリズムがあり、夕方に向けて機嫌が良くなったり日曜の終わりに憂鬱になる傾向が確認されています​
+techxplore.com
+。本個人データでも、投稿数や内容のポジティブさが高い日は活力が高めと推測できます。 3. Pleasanter投稿データ – ユーザー自身が日々記録する日誌データです。これはモデルの入力および出力対象となります。特徴量としてはテキストそのもの（後述）と投稿日時のみを使います。
+※Pleasanterのデータ取得にはPostgreSQLデータベースからSite IDを指定して日次の記録を抽出します。
+エネルギーラベルの自動生成
+上述のStayFreeとTwitter由来の特徴量に基づき、各日をクラスタリングやルールベースで「活動的」or「低調」にラベル付けします。ここでは教師データがないため教師なし学習でラベルを決定します。具体的には、全日の特徴量ベクトル（使用時間、起動回数、投稿数、平均センチメント、深夜利用の有無 等）に対してK平均法 (K-Means) を適用し、自動的に2つのクラスターに分けます​
+pmc.ncbi.nlm.nih.gov
+。一方のクラスタは総じて使用時間・投稿数が多く感情表現も豊かな**「活発な日」、もう一方はそれらが少ない「静かな日」に対応すると考えられます。クラスタの平均特徴を比較し、例えばスマホ使用や投稿が多い方を「活動的」(1)**、少ない方を「低調」(0)と定義します。このラベルが各日のエネルギー状態の教師データとなります。 この方法により、ユーザーの主観抜きで客観データから日々の調子をラベル付けできます。クラスタリングはデータ分布に応じて柔軟に境界を引くため、単純なしきい値決定よりも信頼性が高まる利点があります​
+pmc.ncbi.nlm.nih.gov
+。必要に応じて、クラスタ結果に基づき閾値を設定して判別ルール化することも可能ですが、本システムではクラスタそのものをラベルとしています。
+モデル学習: Pleasanter投稿からの分類
+上で得られた各日のエネルギーラベルを教師データとして、Pleasanterの日誌テキストからその日のエネルギー状態（活動的/低調）を予測するモデルを学習します。モデルにはロジスティック回帰（2クラス分類）を採用し、入力特徴量として日誌テキストおよび投稿数を用います。具体的なテキスト特徴量は:
+投稿本文の長さ: 文字数（その日の出来事の多さの指標）。
+ポジティブ/ネガティブ単語の出現数: 例えば「楽しい」「最高」など前向きな言葉と、「疲れた」「最悪」などネガティブな言葉の数を数えます（辞書ベース判定）。
+感嘆符の数: 日誌中の「!」の個数（感情の強さの指標）。
+TextBlobセンチメント: 念のため英語ベースのTextBlobで計算したポラリティ値も特徴に含めます（日本語テキストでは精度は限定的）。
+以上に加え、その日Pleasanterに記録した件数（投稿エントリが複数ある日もあるため、その数をカウント）も入力に含めます。一般に、活動的な日は日誌が長文になったり複数の出来事を記録し、ポジティブ表現が増える傾向が考えられます。一方、低調な日は「疲れた」「やる気が出ない」といったネガティブワードが日誌に表れたり、極端に短かったりします。 日本語テキストの感情分析: 本モデルでは簡易的にキーワード出現やTextBlobで対応していますが、実運用では日本語の感情分析に適した辞書やモデルを用いると精度向上が期待できます​
+researchgate.net
+。たとえば専門家が作成した日本語感情辞書を用いてポジ/ネガスコアを算出する方法があります​
+researchgate.net
+。 ロジスティック回帰モデルは、これらテキスト特徴からラベル(活動的=1/低調=0)を予測するよう学習させます。学習には過去全期間のデータを用い、モデルパラメータを推定します（データ量が少ないためホールドアウト検証は割愛しています）。研究では、スマホ利用データと主観的気分との対応に個人差が大きいため、各ユーザーに個人別モデルを学習させると精度が向上すると報告されています​
+yecl.org
+​
+yecl.org
+。本システムもユーザー本人のデータで個人最適化されたモデルとなっています。 学習後、このモデルを使って新たなPleasanter投稿に対し推定を実行できます。日誌テキストだけで当日のエネルギー状態を判別できるため、今後スマホやTwitterのデータを毎回ラベル付けに用いなくても、モデルがユーザーの記述内容から自動判定してダッシュボード表示することが可能です。
+ダッシュボードによる可視化 (Dash)
+学習済みモデルの予測結果は、Dashフレームワークによってインタラクティブな健康ダッシュボードに表示されます。主な可視化コンポーネントは次のとおりです:
+日別バーチャート: 各日の推定エネルギーレベルを棒グラフで示します（高さ0～1のスコア、色で活動的/低調を区別）。日付軸に沿って色付きバーを配置することで、日々の活動度の推移を直感的に把握できます。例えば、棒が高く赤い日が連続していれば活発な期間、低く緑の日が多ければ低調が続いていることが一目で分かります。
+カレンダー・ヒートマップ: 年月カレンダー形式のヒートマップ上に日々のエネルギースコアをプロットします。色の濃淡（赤～緑）でその日の活力レベルを表現し、カレンダー全体で月間の傾向を俯瞰できます。例えば、週末に赤が多ければ週末は活発、平日は緑が多ければ平日は低調、といったパターンが可視化されます。
+カレンダー形式でのエネルギーレベル可視化（赤＝活動的、緑＝低調）
+データ一覧テーブル: 各日の詳細データを表形式で表示します。日付ごとのPleasanterタイトル・本文、モデル予測ラベル（活動的/低調）とスコアなどを一覧できます。これにより、ユーザーは具体的にその日に何があり、モデルがどう判断したかを確認できます。
+ダッシュボードのタイトルやラベル表示は日本語対応としており、ユーザーに分かりやすい形で結果を提示します。以上の可視化によって、ユーザーは自身の習慣・気分の傾向を振り返りやすくなり、自己管理や振り返りに役立てることができます。
+Python実装: create.sh スクリプト
+以下が本プロジェクトの環境構築とコード一括生成を行うcreate.shスクリプトです。スクリプトを実行すると必要なディレクトリとファイルが作成され、Dockerコンテナ内でDashサーバーが起動します。（注: PostgreSQL上のPleasanterデータや教師データの配置は事前に.envで指定されたパスに用意しておきます）。
+bash
+コピーする
+編集する
+#!/usr/bin/env bash
+# create.sh ―― health_dashboard プロジェクト＋Docker構成を一括スキャフォールド＆起動
+# フルコード／エラー対策付き
+
+set -euo pipefail
+
+########################################
+# 1. 変数定義（ホスト／コンテナ パス）
+########################################
+BASE_DIR=$(pwd)
+PROJECT_NAME="health_dashboard"
+PROJECT_ROOT="${BASE_DIR}/${PROJECT_NAME}"
+
+# ホスト側ディレクトリ
+HOST_TEACHER_DIR="${BASE_DIR}/teacher_data"
+
+# コンテナ内ディレクトリ
+CNTR_TEACHER_DIR="/myhealth/teacher_data"
+CNTR_MODEL_DIR="/myhealth/models"
+CNTR_DATA_DIR="/myhealth/data"
+CNTR_DASHBOARD_DIR="/myhealth/dashboard"
+
+# Docker Compose volumes 定義 (ホスト:コンテナ)
+VOLUMES=(
+  "${HOST_TEACHER_DIR}:${CNTR_TEACHER_DIR}"
+  "./models:${CNTR_MODEL_DIR}"
+  "./data:${CNTR_DATA_DIR}"
+  "./dashboard:${CNTR_DASHBOARD_DIR}"
+)
+
+########################################
+# 2. プログラム生成セクション
+########################################
+# 2-1. teacher_data フォルダ確認
+if [ ! -d "${HOST_TEACHER_DIR}" ]; then
+  echo "‼️ Error: ${HOST_TEACHER_DIR} が見つかりません。配置を確認してください。"
+  exit 1
+fi
+
+# 2-2. 既存プロジェクトクリア
+if [ -d "${PROJECT_ROOT}" ]; then
+  echo "▶ 既存プロジェクトを削除: ${PROJECT_ROOT}"
+  (cd "${PROJECT_ROOT}" && docker compose down --volumes) || true
+  rm -rf "${PROJECT_ROOT}"
+fi
+
+# 2-3. プロジェクト構造作成
+echo "▶ プロジェクト構造作成: ${PROJECT_ROOT}"
+mkdir -p "${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}"
+
+for pkg in data_sources features strategies models dashboard; do
+  mkdir -p "$pkg"
+  touch "$pkg/__init__.py"
+done
+
+# 2-4. .env （環境変数定義）
+cat > .env <<EOF
+DB_HOST=pleasanter_postgres
+DB_PORT=5432
+DB_NAME=Implem.Pleasanter
+DB_USER=postgres
+DB_PASS=MyStrongPostgresPass!
+SITE_ID=3
+STAYFREE_DIR=${CNTR_TEACHER_DIR}/stayfree_exports
+TWITTER_DIR=${CNTR_TEACHER_DIR}/twitter_exports
+MODEL_DIR=${CNTR_MODEL_DIR}
+EOF
+
+# 2-5. requirements.txt （依存パッケージ）
+cat > requirements.txt <<EOF
+dash
+pandas
+numpy
+scikit-learn
+psycopg2-binary
+python-dotenv
+textblob
+plotly
+plotly-calplot
+EOF
+
+# 2-6. data_sources/pleasanter.py (Pleasanter DBからデータ取得)
+cat > data_sources/pleasanter.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import pandas as pd, psycopg2
+from dotenv import load_dotenv
+from psycopg2.extras import RealDictCursor
+
+load_dotenv()
+
+def fetch_daily_entries(start_date=None, end_date=None):
+    """PleasanterのResultsテーブルから日次の投稿データを取得"""
+    try:
+        conn = psycopg2.connect(
+            host=os.getenv('DB_HOST'),
+            port=os.getenv('DB_PORT'),
+            database=os.getenv('DB_NAME'),
+            user=os.getenv('DB_USER'),
+            password=os.getenv('DB_PASS')
+        )
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        site_id = os.getenv('SITE_ID', '3')
+        sql = 'SELECT * FROM "Implem.Pleasanter"."Results" WHERE "SiteId" = %s'
+        params = [site_id]
+        if start_date and end_date:
+            sql += ' AND "UpdatedTime" BETWEEN %s AND %s'
+            params += [f"{start_date} 00:00:00", f"{end_date} 23:59:59"]
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    except Exception as e:
+        print(f"Error fetching DB entries: {e}")
+        return pd.DataFrame()
+    finally:
+        if 'conn' in locals():
+            conn.close()
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df['created_at'] = pd.to_datetime(df['UpdatedTime'], errors='coerce')
+        df['date'] = df['created_at'].dt.normalize()  # 日付のみ（時間切り捨て）
+        df.rename(columns={'Body': 'content', 'Title': 'title'}, inplace=True)
+    return df
+EOF
+
+# 2-7. data_sources/stayfree_loader.py (StayFreeエクスポートCSV読み込み)
+cat > data_sources/stayfree_loader.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys, glob
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import pandas as pd
+
+def load_stayfree_data():
+    """StayFreeエクスポートCSVを読み込み結合"""
+    data_dir = os.getenv('STAYFREE_DIR', './teacher_data/stayfree_exports')
+    if not os.path.isdir(data_dir):
+        return pd.DataFrame()
+    dfs = []
+    for f in glob.glob(f"{data_dir}/*.csv"):
+        df = pd.read_csv(f)
+        # 'date'列が文字列の場合はdatetimeに変換
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df['date'] = df['date'].dt.normalize()
+        dfs.append(df)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+EOF
+
+# 2-8. data_sources/twitter_loader.py (TwitterエクスポートZIP読み込み)
+cat > data_sources/twitter_loader.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys, zipfile, json
+from datetime import datetime
+import pandas as pd
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+def load_twitter_data():
+    """Twitterデータ（ZIPアーカイブ）を読み込み、ツイート一覧のDataFrameを返す"""
+    data_dir = os.getenv('TWITTER_DIR', './teacher_data/twitter_exports')
+    if not os.path.isdir(data_dir):
+        return pd.DataFrame()
+    all_tweets = []
+    for fname in os.listdir(data_dir):
+        if fname.lower().endswith('.zip'):
+            try:
+                with zipfile.ZipFile(os.path.join(data_dir, fname)) as zp:
+                    for member in zp.namelist():
+                        if member.endswith('tweet.js') or member.endswith('tweets.js'):
+                            raw = zp.read(member).decode('utf-8')
+                            # JSONデータ部分を抽出してロード
+                            js_str = raw.partition('=')[-1].strip().rstrip(';')
+                            tweets = json.loads(js_str)
+                            all_tweets.extend(tweets)
+            except Exception as e:
+                continue
+    if not all_tweets:
+        return pd.DataFrame()
+    df = pd.json_normalize(all_tweets)
+    # 日付をdatetimeに、内容テキストをcontentに統一
+    if 'created_at' in df.columns:
+        df['created_at'] = df['created_at'].apply(
+            lambda x: datetime.strptime(x, "%a %b %d %H:%M:%S %z %Y") if isinstance(x, str) else pd.NaT
+        )
+        df['date'] = df['created_at'].dt.normalize()
+    # ツイート本文フィールドをcontentにリネーム（フルテキスト優先）
+    if 'full_text' in df.columns:
+        df.rename(columns={'full_text': 'content'}, inplace=True)
+    elif 'text' in df.columns:
+        df.rename(columns={'text': 'content'}, inplace=True)
+    return df
+EOF
+
+# 2-9. features/featurize.py (特徴量抽出処理)
+cat > features/featurize.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import pandas as pd
+from textblob import TextBlob
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+from data_sources.pleasanter import fetch_daily_entries
+from data_sources.stayfree_loader import load_stayfree_data
+from data_sources.twitter_loader import load_twitter_data
+
+def create_feature_set():
+    """StayFreeとTwitterデータから日次特徴を作成し、クラスタリングでエネルギーラベルを付与したDataFrameを返す"""
+    # データ取得
+    df_posts = fetch_daily_entries()
+    df_stay = load_stayfree_data()
+    df_tw = load_twitter_data()
+    # 日付リスト作成（各データに含まれる全日付の和集合）
+    dates = set()
+    if not df_posts.empty:
+        dates |= set(df_posts['date'].dropna().dtnormalize())
+
+...（`features/featurize.py` 以下続き）
+
+```bash
+        dates |= set(df_posts['date'].dropna().dt.normalize())
+    if not df_stay.empty:
+        dates |= set(df_stay['date'].dropna().dt.normalize())
+    if not df_tw.empty:
+        dates |= set(df_tw['date'].dropna().dt.normalize())
+    if not dates:
+        return pd.DataFrame()  # データがない場合空
+    all_dates = sorted(list(dates))
+    df_all = pd.DataFrame({'date': all_dates})
+    # StayFreeデータを日次集計
+    df_stay_feat = pd.DataFrame()
+    if not df_stay.empty:
+        # 日ごとに使用時間・起動回数を集計
+        group_stay = df_stay.dropna(subset=['date']).groupby('date')
+        usage_count = group_stay.size()  # レコード数
+        usage_total = None; usage_sessions = None
+        # 列名から使用時間と起動回数の列を推測
+        for col in df_stay.columns:
+            col_l = col.lower()
+            if usage_total is None and any(x in col_l for x in ['duration','usage','time','時間']):
+                try:
+                    usage_total = group_stay[col].sum()
+                except:
+                    usage_total = None
+            if usage_sessions is None and any(x in col_l for x in ['open','launch','起動']):
+                try:
+                    usage_sessions = group_stay[col].sum()
+                except:
+                    usage_sessions = None
+        if usage_sessions is None:
+            usage_sessions = usage_count
+        df_stay_feat = pd.DataFrame({'date': usage_count.index})
+        df_stay_feat['usage_sessions'] = usage_sessions.values
+        if usage_total is not None:
+            df_stay_feat['usage_total'] = usage_total.values
+    # Twitterデータを日次集計
+    df_tw_feat = pd.DataFrame()
+    if not df_tw.empty:
+        # 各ツイートのセンチメント・感嘆符カウントを計算
+        if 'content' in df_tw.columns:
+            df_tw['tweet_sent'] = df_tw['content'].apply(lambda x: TextBlob(str(x)).sentiment.polarity if pd.notna(x) else 0)
+            df_tw['exclamations'] = df_tw['content'].apply(lambda x: (str(x).count('!') + str(x).count('！')) if pd.notna(x) else 0)
+        else:
+            df_tw['tweet_sent'] = 0
+            df_tw['exclamations'] = 0
+        group_tw = df_tw.dropna(subset=['date']).groupby('date')
+        tweet_count = group_tw.size()
+        avg_sent = group_tw['tweet_sent'].mean() if 'tweet_sent' in df_tw else None
+        sum_excl = group_tw['exclamations'].sum() if 'exclamations' in df_tw else None
+        df_tw_feat = pd.DataFrame({'date': tweet_count.index})
+        df_tw_feat['tweet_count'] = tweet_count.values
+        df_tw_feat['tweet_sentiment'] = avg_sent.values if avg_sent is not None else 0
+        df_tw_feat['tweet_exclamations'] = sum_excl.values if sum_excl is not None else 0
+    # 結合: 全日付ベースにStayFreeとTwitter特徴をマージ
+    df_features = df_all.copy()
+    if not df_stay_feat.empty:
+        df_features = df_features.merge(df_stay_feat, on='date', how='left')
+    if not df_tw_feat.empty:
+        df_features = df_features.merge(df_tw_feat, on='date', how='left')
+    df_features.fillna(0, inplace=True)
+    # 必要な特徴量列を抽出（date以外）
+    feature_cols = [col for col in df_features.columns if col != 'date']
+    if not feature_cols:
+        return pd.DataFrame()
+    X = df_features[feature_cols].values
+    # 特徴量を標準化してクラスタリング
+    X_scaled = StandardScaler().fit_transform(X)
+    kmeans = KMeans(n_clusters=2, n_init='auto', random_state=0)
+    labels = kmeans.fit_predict(X_scaled)
+    df_features['cluster'] = labels
+    # クラスターの平均値からラベル(活動的=1, 低調=0)を決定
+    cluster_means = df_features.groupby('cluster')[feature_cols].mean()
+    score = {}
+    for cluster in cluster_means.index:
+        # 使用頻度と投稿数の合計でスコアリング
+        score[cluster] = 0
+        if 'usage_sessions' in cluster_means.columns:
+            score[cluster] += cluster_means.loc[cluster, 'usage_sessions']
+        if 'usage_total' in cluster_means.columns:
+            score[cluster] += cluster_means.loc[cluster, 'usage_total'] / 60.0  # 分→時間換算で加算
+        if 'tweet_count' in cluster_means.columns:
+            score[cluster] += cluster_means.loc[cluster, 'tweet_count']
+        if 'tweet_exclamations' in cluster_means.columns:
+            score[cluster] += cluster_means.loc[cluster, 'tweet_exclamations']
+    # スコアが高い方を活動的(1)とする
+    active_cluster = max(score, key=score.get)
+    low_cluster = [c for c in score.keys() if c != active_cluster][0] if len(score) > 1 else (1-active_cluster)
+    df_features['energy_label'] = df_features['cluster'].apply(lambda c: 1 if c == active_cluster else 0)
+    return df_features
+EOF
+
+# 2-10. models/predictor.py (モデル学習・予測処理)
+cat > models/predictor.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys, pickle
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from features.featurize import create_feature_set
+from data_sources.pleasanter import fetch_daily_entries
+from textblob import TextBlob
+
+MODEL_PATH = os.getenv('MODEL_DIR', './models') + '/health_model.pkl'
+
+def train_model():
+    """特徴量抽出とモデル学習を行い、モデルを保存"""
+    df_feat = create_feature_set()
+    if df_feat.empty or 'energy_label' not in df_feat.columns:
+        print("No data available for training.")
+        return
+    # Pleasanter投稿を日次で集約（同日複数投稿は結合）
+    df_posts = fetch_daily_entries()
+    if df_posts.empty:
+        print("No Pleasanter data for training.")
+        return
+    # 日付単位にタイトル・本文を統合しエントリ数を算出
+    df_posts_grouped = df_posts.groupby('date').agg({
+        'title': lambda x: ' | '.join([str(t) for t in x if pd.notna(t)]),
+        'content': lambda x: ' '.join([str(c) for c in x if pd.notna(c)]),
+        'ResultId': lambda x: ','.join(map(str, x)),
+    }).reset_index()
+    df_posts_grouped['entry_count'] = df_posts_grouped['ResultId'].apply(lambda s: len(str(s).split(',')) if pd.notna(s) else 0)
+    # ラベルをマージ
+    df_train = pd.merge(df_posts_grouped, df_feat[['date','energy_label']], on='date', how='inner')
+    if df_train.empty:
+        print("No matching data for training after merge.")
+        return
+    # テキスト特徴量を計算
+    df_train['content_sentiment'] = df_train['content'].apply(lambda x: TextBlob(str(x)).sentiment.polarity if pd.notna(x) else 0)
+    df_train['content_length'] = df_train['content'].astype(str).apply(len)
+    # ポジティブ/ネガティブ単語リスト
+    pos_words = ["楽しい","嬉しい","元気","良い","最高","充実","楽しかった","良かった"]
+    neg_words = ["疲れた","悲しい","辛い","最悪","ネガティブ","しんどい","だるい","やる気がない"]
+    df_train['pos_count'] = df_train['content'].astype(str).apply(lambda text: sum(text.count(w) for w in pos_words))
+    df_train['neg_count'] = df_train['content'].astype(str).apply(lambda text: sum(text.count(w) for w in neg_words))
+    df_train['exclamations'] = df_train['content'].astype(str).apply(lambda text: text.count('!') + text.count('！'))
+    # 学習用の説明変数Xと目的変数yを準備
+    feature_cols = ['entry_count', 'content_length', 'content_sentiment', 'pos_count', 'neg_count', 'exclamations']
+    # スケーリングやベクトル化は簡易のため省略し、そのままロジスティック回帰へ
+    X = df_train[feature_cols].values
+    # content_lengthは桁が大きいので若干スケール調整
+    for i, col in enumerate(feature_cols):
+        if col == 'content_length':
+            X[:, i] = X[:, i] / 100.0
+    y = df_train['energy_label'].values
+    model = LogisticRegression(max_iter=1000, random_state=0)
+    model.fit(X, y)
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    with open(MODEL_PATH, 'wb') as f:
+        pickle.dump(model, f)
+    print("Model trained and saved.")
+
+def predict():
+    """学習済みモデルを用いてPleasanter投稿の日次エネルギー予測を実施し、結果DataFrameを返す"""
+    # モデルが無ければ学習を実行
+    if not os.path.isfile(MODEL_PATH):
+        train_model()
+    if not os.path.isfile(MODEL_PATH):
+        return pd.DataFrame()
+    with open(MODEL_PATH, 'rb') as f:
+        model = pickle.load(f)
+    df_posts = fetch_daily_entries()
+    if df_posts.empty:
+        return pd.DataFrame()
+    df_posts_grouped = df_posts.groupby('date').agg({
+        'title': lambda x: ' | '.join([str(t) for t in x if pd.notna(t)]),
+        'content': lambda x: ' '.join([str(c) for c in x if pd.notna(c)]),
+        'ResultId': lambda x: ','.join(map(str, x)),
+    }).reset_index()
+    df_posts_grouped['entry_count'] = df_posts_grouped['ResultId'].apply(lambda s: len(str(s).split(',')) if pd.notna(s) else 0)
+    # テキスト特徴量抽出（モデルと同じ処理）
+    df_posts_grouped['content_sentiment'] = df_posts_grouped['content'].apply(lambda x: TextBlob(str(x)).sentiment.polarity if pd.notna(x) else 0)
+    df_posts_grouped['content_length'] = df_posts_grouped['content'].astype(str).apply(len)
+    pos_words = ["楽しい","嬉しい","元気","良い","最高","充実","楽しかった","良かった"]
+    neg_words = ["疲れた","悲しい","辛い","最悪","ネガティブ","しんどい","だるい","やる気がない"]
+    df_posts_grouped['pos_count'] = df_posts_grouped['content'].astype(str).apply(lambda text: sum(text.count(w) for w in pos_words))
+    df_posts_grouped['neg_count'] = df_posts_grouped['content'].astype(str).apply(lambda text: sum(text.count(w) for w in neg_words))
+    df_posts_grouped['exclamations'] = df_posts_grouped['content'].astype(str).apply(lambda text: text.count('!') + text.count('！'))
+    # 予測
+    feature_cols = ['entry_count', 'content_length', 'content_sentiment', 'pos_count', 'neg_count', 'exclamations']
+    X = df_posts_grouped[feature_cols].values
+    for i, col in enumerate(feature_cols):
+        if col == 'content_length':
+            X[:, i] = X[:, i] / 100.0
+    probs = model.predict_proba(X)[:, 1]  # クラス1(活動的)の確率
+    preds = model.predict(X)
+    df_posts_grouped['pred_energy'] = probs
+    df_posts_grouped['power_state'] = preds
+    df_posts_grouped['power_state'] = df_posts_grouped['power_state'].map({1: '活動的', 0: '低調'})
+    return df_posts_grouped
+EOF
+
+# 2-11. strategies/train.py (モデル学習エントリポイント)
+cat > strategies/train.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
+sys.path.insert(0, PROJECT_ROOT)
+
+from models.predictor import train_model
+
+if __name__ == '__main__':
+    train_model()
+EOF
+
+# 2-12. strategies/predict.py (予測エントリポイント)
+cat > strategies/predict.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
+sys.path.insert(0, PROJECT_ROOT)
+
+from models.predictor import predict
+
+if __name__ == '__main__':
+    df = predict()
+    print(df.to_csv(index=False))
+EOF
+
+# 2-13. dashboard/app.py (Dashダッシュボードアプリ)
+cat > dashboard/app.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import dash
+from dash import dcc, html, dash_table
+import pandas as pd
+import plotly.express as px
+
+from strategies.predict import predict
+
+def main():
+    df = predict()
+    if df.empty:
+        return
+    df = df.sort_values('date')
+    # グラフ用データ準備
+    # 日別バー (活動度推移)
+    fig1 = px.bar(
+        df, x='date', y='pred_energy', color='power_state',
+        title='日々の活動度',
+        labels={'date': '日付', 'pred_energy': 'エネルギーレベル', 'power_state': '状態'}
+    )
+    fig1.update_layout(barmode='group', xaxis=dict(type='category'))
+    # カレンダーヒートマップ
+    try:
+        import plotly_calplot
+        fig2 = plotly_calplot.calplot(
+            df, x='date', y='pred_energy',
+            colorscale='RdYlGn', title='エネルギーカレンダー'
+        )
+    except ImportError:
+        df['month'] = df['date'].dt.month
+        df['day'] = df['date'].dt.day
+        pivot = df.pivot_table(index='month', columns='day', values='pred_energy', aggfunc='mean')
+        fig2 = px.imshow(pivot, origin='lower', color_continuous_scale='RdYlGn',
+                         labels={'color': 'エネルギー'}, title='エネルギー ヒートマップ')
+    # DataTable用に列名を設定（日本語）
+    df_display = df.copy()
+    df_display = df_display[['date', 'power_state', 'pred_energy', 'entry_count', 'title', 'content', 'ResultId']]
+    df_display.columns = ['日付', '状態', 'エネルギーレベル', '件数', 'タイトル', '内容', 'ID']
+    app = dash.Dash(__name__)
+    app.layout = html.Div([
+        html.H1("健康ダッシュボード"),
+        dcc.Graph(figure=fig1),
+        dcc.Graph(figure=fig2),
+        html.H2("投稿データ一覧"),
+        dash_table.DataTable(
+            columns=[{'name': c, 'id': c} for c in df_display.columns],
+            data=df_display.to_dict('records'),
+            page_size=10,
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left', 'padding': '4px'},
+            style_header={'backgroundColor': '#f0f0f0', 'fontWeight': 'bold'}
+        )
+    ], style={'padding': '20px'})
+    app.run(host='0.0.0.0', port=8060, debug=True)
+
+if __name__ == '__main__':
+    main()
+EOF
+
+# 2-14. entrypoint.sh （コンテナ起動時のエントリポイント）
+cat > entrypoint.sh << 'EOF'
+#!/bin/sh
+set -e
+echo "▶ Running train.py..."
+python /myhealth/strategies/train.py
+echo "▶ Starting Dash on 8060..."
+exec python /myhealth/dashboard/app.py
+EOF
+chmod +x entrypoint.sh
+
+# 2-15. Dockerfile （コンテナイメージビルド設定）
+cat > Dockerfile << 'EOF'
+FROM python:3.11-slim
+WORKDIR /myhealth
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+EXPOSE 8060
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python","/myhealth/dashboard/app.py"]
+EOF
+
+########################################
+# 3. 操作セクション（セットアップ & 起動）
+########################################
+# docker-compose.yml を生成
+cat > docker-compose.yml <<EOF
+version: '3.8'
+services:
+  app:
+    build: .
+    container_name: ${PROJECT_NAME}
+    ports:
+      - "8060:8060"
+    volumes:
+EOF
+for vol in "${VOLUMES[@]}"; do
+  echo "      - \"$vol\"" >> docker-compose.yml
+done
+cat >> docker-compose.yml <<EOF
+    environment:
+      DB_HOST: "pleasanter_postgres"
+      DB_PORT: "5432"
+      DB_NAME: "Implem.Pleasanter"
+      DB_USER: "postgres"
+      DB_PASS: "MyStrongPostgresPass!"
+      SITE_ID: "3"
+      STAYFREE_DIR: "${CNTR_TEACHER_DIR}/stayfree_exports"
+      TWITTER_DIR: "${CNTR_TEACHER_DIR}/twitter_exports"
+      MODEL_DIR: "${CNTR_MODEL_DIR}"
+    networks:
+      - pleasanter-net
+networks:
+  pleasanter-net:
+    external: true
+    name: pleasanterDocker_default
+EOF
+
+# ビルド & 起動
+echo "▶ Dockerイメージをビルド"
+docker compose build --no-cache --pull
+echo "▶ コンテナを起動"
+docker compose up -d
+
+echo "✅ Setup 完了: http://localhost:8060"
+健康ダッシュボード：ユーザー活動エネルギーの推定
+問題の概要
+ユーザーのスマートフォン利用データ（StayFreeアプリのログ）およびTwitter投稿履歴から活動量や利用パターンを特徴量として抽出し、各日ごとの「エネルギーレベル」（感情的な強度や活力の程度）を自動的に推定します。具体的には、外部データからその日の「パワー状態」（活動的か低調か）をラベル付けし、それを教師データとしてPleasanterの日誌投稿（テキストと日付）から日次のパワー状態を分類する機械学習モデルを構築します。最終的に、Dashによるダッシュボード上で日々のエネルギー状態をバーチャートやカレンダー形式のヒートマップで可視化します。 このアプローチにより、ユーザーが主観的にラベル付けしなくても、スマホの利用傾向やSNS投稿内容から自動的に活力状態を推定できます。研究例として、スマホの使用履歴やコミュニケーションパターンからユーザーの気分や活動度を66～93%の精度で当てる試み（MoodScope）も報告されており​
+yecl.org
+、デジタル行動データをクラスタリングしてユーザー状態を分類する手法は有望とされています​
+pmc.ncbi.nlm.nih.gov
+。さらに、Twitter投稿の内容や時間帯から集団の気分リズムを追跡できることも示されています​
+techxplore.com
+。本プロジェクトでは、こうした知見を活かし、ユーザー個人のデータに基づいて日々のエネルギー状態を推定・可視化します。
+データソースと特徴量抽出
+1. StayFreeアプリ利用ログ（CSV） – スマホの利用傾向を把握するデータです。日付ごとに起床時間/就寝時間の推定や総画面使用時間、アプリ使用の頻度（起動回数）などを特徴量として抽出します。具体的には、各日のスマホ利用セッションから以下の指標を計算します:
+総使用時間（分）: その日スマホを使用した合計時間（複数アプリの合計）。
+起動回数（頻度）: アプリを起動した総回数（画面を開いた頻度）。
+深夜使用の有無: 深夜（例: 0時～5時）に使用があったかどうかによる睡眠中断の指標。
+利用アプリ数: その日に使用した異なるアプリの種類数（活動の多様性指標）。
+これらの特徴から、一般に使用時間や頻度が多い＝活動的、深夜遅くまで使用＝翌日低調の可能性などの関連を想定します。例えば、MoodScopeの研究でも通話やアプリ使用パターンから日ごとの活発度（activeness）を推定できることが示されています​
+yecl.org
+。 2. Twitter投稿データ（ZIP） – ユーザーのTwitter投稿履歴を解析し、その日の投稿数や投稿時間帯、内容の感情傾向を特徴量とします。各日のツイート群から以下を抽出します:
+投稿件数: 日ごとのツイート数（発信量の指標）。
+平均投稿時間: 投稿時刻の傾向（朝型か夜型か）。必要に応じて深夜帯の投稿有無も特徴化。
+投稿内容のセンチメント: ツイート本文の平均感情極性（TextBlobによるポジティブ/ネガティブ判定）​
+techxplore.com
+。
+感情表現の頻度: 感嘆符「!」や絵文字など感情の強さを示す表現の出現数。例えば「!」の数は興奮度合いを反映すると考えられます。
+Twitterデータからはその日どれだけ積極的・感情的な発信をしていたかを捉えます。実際、大規模な分析から人々のツイートには日周期・週周期で感情のリズムがあり、夕方に向けて機嫌が良くなったり日曜の終わりに憂鬱になる傾向が確認されています​
+techxplore.com
+。本個人データでも、投稿数や内容のポジティブさが高い日は活力が高めと推測できます。 3. Pleasanter投稿データ – ユーザー自身が日々記録する日誌データです。これはモデルの入力および出力対象となります。特徴量としてはテキストそのもの（後述）と投稿日時のみを使います。
+※Pleasanterのデータ取得にはPostgreSQLデータベースからSite IDを指定して日次の記録を抽出します。
+エネルギーラベルの自動生成
+上述のStayFreeとTwitter由来の特徴量に基づき、各日をクラスタリングやルールベースで「活動的」or「低調」にラベル付けします。ここでは教師データがないため教師なし学習でラベルを決定します。具体的には、全日の特徴量ベクトル（使用時間、起動回数、投稿数、平均センチメント、深夜利用の有無 等）に対してK平均法 (K-Means) を適用し、自動的に2つのクラスターに分けます​
+pmc.ncbi.nlm.nih.gov
+。一方のクラスタは総じて使用時間・投稿数が多く感情表現も豊かな**「活発な日」、もう一方はそれらが少ない「静かな日」に対応すると考えられます。クラスタの平均特徴を比較し、例えばスマホ使用や投稿が多い方を「活動的」(1)**、少ない方を「低調」(0)と定義します。このラベルが各日のエネルギー状態の教師データとなります。 この方法により、ユーザーの主観抜きで客観データから日々の調子をラベル付けできます。クラスタリングはデータ分布に応じて柔軟に境界を引くため、単純なしきい値決定よりも信頼性が高まる利点があります​
+pmc.ncbi.nlm.nih.gov
+。必要に応じて、クラスタ結果に基づき閾値を設定して判別ルール化することも可能ですが、本システムではクラスタそのものをラベルとしています。
+モデル学習: Pleasanter投稿からの分類
+上で得られた各日のエネルギーラベルを教師データとして、Pleasanterの日誌テキストからその日のエネルギー状態（活動的/低調）を予測するモデルを学習します。モデルにはロジスティック回帰（2クラス分類）を採用し、入力特徴量として日誌テキストおよび投稿数を用います。具体的なテキスト特徴量は:
+投稿本文の長さ: 文字数（その日の出来事の多さの指標）。
+ポジティブ/ネガティブ単語の出現数: 例えば「楽しい」「最高」など前向きな言葉と、「疲れた」「最悪」などネガティブな言葉の数を数えます（辞書ベース判定）。
+感嘆符の数: 日誌中の「!」の個数（感情の強さの指標）。
+TextBlobセンチメント: 念のため英語ベースのTextBlobで計算したポラリティ値も特徴に含めます（日本語テキストでは精度は限定的）。
+以上に加え、その日Pleasanterに記録した件数（投稿エントリが複数ある日もあるため、その数をカウント）も入力に含めます。一般に、活動的な日は日誌が長文になったり複数の出来事を記録し、ポジティブ表現が増える傾向が考えられます。一方、低調な日は「疲れた」「やる気が出ない」といったネガティブワードが日誌に表れたり、極端に短かったりします。 日本語テキストの感情分析: 本モデルでは簡易的にキーワード出現やTextBlobで対応していますが、実運用では日本語の感情分析に適した辞書やモデルを用いると精度向上が期待できます​
+researchgate.net
+。たとえば専門家が作成した日本語感情辞書を用いてポジ/ネガスコアを算出する方法があります​
+researchgate.net
+。 ロジスティック回帰モデルは、これらテキスト特徴からラベル(活動的=1/低調=0)を予測するよう学習させます。学習には過去全期間のデータを用い、モデルパラメータを推定します（データ量が少ないためホールドアウト検証は割愛しています）。研究では、スマホ利用データと主観的気分との対応に個人差が大きいため、各ユーザーに個人別モデルを学習させると精度が向上すると報告されています​
+yecl.org
+​
+yecl.org
+。本システムもユーザー本人のデータで個人最適化されたモデルとなっています。 学習後、このモデルを使って新たなPleasanter投稿に対し推定を実行できます。日誌テキストだけで当日のエネルギー状態を判別できるため、今後スマホやTwitterのデータを毎回ラベル付けに用いなくても、モデルがユーザーの記述内容から自動判定してダッシュボード表示することが可能です。
+ダッシュボードによる可視化 (Dash)
+学習済みモデルの予測結果は、Dashフレームワークによってインタラクティブな健康ダッシュボードに表示されます。主な可視化コンポーネントは次のとおりです:
+日別バーチャート: 各日の推定エネルギーレベルを棒グラフで示します（高さ0～1のスコア、色で活動的/低調を区別）。日付軸に沿って色付きバーを配置することで、日々の活動度の推移を直感的に把握できます。例えば、棒が高く赤い日が連続していれば活発な期間、低く緑の日が多ければ低調が続いていることが一目で分かります。
+カレンダー・ヒートマップ: 年月カレンダー形式のヒートマップ上に日々のエネルギースコアをプロットします。色の濃淡（赤～緑）でその日の活力レベルを表現し、カレンダー全体で月間の傾向を俯瞰できます。例えば、週末に赤が多ければ週末は活発、平日は緑が多ければ平日は低調、といったパターンが可視化されます。
+カレンダー形式でのエネルギーレベル可視化（赤＝活動的、緑＝低調）
+データ一覧テーブル: 各日の詳細データを表形式で表示します。日付ごとのPleasanterタイトル・本文、モデル予測ラベル（活動的/低調）とスコアなどを一覧できます。これにより、ユーザーは具体的にその日に何があり、モデルがどう判断したかを確認できます。
+ダッシュボードのタイトルやラベル表示は日本語対応としており、ユーザーに分かりやすい形で結果を提示します。以上の可視化によって、ユーザーは自身の習慣・気分の傾向を振り返りやすくなり、自己管理や振り返りに役立てることができます。
+Python実装: create.sh スクリプト
+以下が本プロジェクトの環境構築とコード一括生成を行うcreate.shスクリプトです。スクリプトを実行すると必要なディレクトリとファイルが作成され、Dockerコンテナ内でDashサーバーが起動します。（注: PostgreSQL上のPleasanterデータや教師データの配置は事前に.envで指定されたパスに用意しておきます）。
+bash
+コピーする
+編集する
+#!/usr/bin/env bash
+# create.sh ―― health_dashboard プロジェクト＋Docker構成を一括スキャフォールド＆起動
+# フルコード／エラー対策付き
+
+set -euo pipefail
+
+########################################
+# 1. 変数定義（ホスト／コンテナ パス）
+########################################
+BASE_DIR=$(pwd)
+PROJECT_NAME="health_dashboard"
+PROJECT_ROOT="${BASE_DIR}/${PROJECT_NAME}"
+
+# ホスト側ディレクトリ
+HOST_TEACHER_DIR="${BASE_DIR}/teacher_data"
+
+# コンテナ内ディレクトリ
+CNTR_TEACHER_DIR="/myhealth/teacher_data"
+CNTR_MODEL_DIR="/myhealth/models"
+CNTR_DATA_DIR="/myhealth/data"
+CNTR_DASHBOARD_DIR="/myhealth/dashboard"
+
+# Docker Compose volumes 定義 (ホスト:コンテナ)
+VOLUMES=(
+  "${HOST_TEACHER_DIR}:${CNTR_TEACHER_DIR}"
+  "./models:${CNTR_MODEL_DIR}"
+  "./data:${CNTR_DATA_DIR}"
+  "./dashboard:${CNTR_DASHBOARD_DIR}"
+)
+
+########################################
+# 2. プログラム生成セクション
+########################################
+# 2-1. teacher_data フォルダ確認
+if [ ! -d "${HOST_TEACHER_DIR}" ]; then
+  echo "‼️ Error: ${HOST_TEACHER_DIR} が見つかりません。配置を確認してください。"
+  exit 1
+fi
+
+# 2-2. 既存プロジェクトクリア
+if [ -d "${PROJECT_ROOT}" ]; then
+  echo "▶ 既存プロジェクトを削除: ${PROJECT_ROOT}"
+  (cd "${PROJECT_ROOT}" && docker compose down --volumes) || true
+  rm -rf "${PROJECT_ROOT}"
+fi
+
+# 2-3. プロジェクト構造作成
+echo "▶ プロジェクト構造作成: ${PROJECT_ROOT}"
+mkdir -p "${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}"
+
+for pkg in data_sources features strategies models dashboard; do
+  mkdir -p "$pkg"
+  touch "$pkg/__init__.py"
+done
+
+# 2-4. .env （環境変数定義）
+cat > .env <<EOF
+DB_HOST=pleasanter_postgres
+DB_PORT=5432
+DB_NAME=Implem.Pleasanter
+DB_USER=postgres
+DB_PASS=MyStrongPostgresPass!
+SITE_ID=3
+STAYFREE_DIR=${CNTR_TEACHER_DIR}/stayfree_exports
+TWITTER_DIR=${CNTR_TEACHER_DIR}/twitter_exports
+MODEL_DIR=${CNTR_MODEL_DIR}
+EOF
+
+# 2-5. requirements.txt （依存パッケージ）
+cat > requirements.txt <<EOF
+dash
+pandas
+numpy
+scikit-learn
+psycopg2-binary
+python-dotenv
+textblob
+plotly
+plotly-calplot
+EOF
+
+# 2-6. data_sources/pleasanter.py (Pleasanter DBからデータ取得)
+cat > data_sources/pleasanter.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import pandas as pd, psycopg2
+from dotenv import load_dotenv
+from psycopg2.extras import RealDictCursor
+
+load_dotenv()
+
+def fetch_daily_entries(start_date=None, end_date=None):
+    """PleasanterのResultsテーブルから日次の投稿データを取得"""
+    try:
+        conn = psycopg2.connect(
+            host=os.getenv('DB_HOST'),
+            port=os.getenv('DB_PORT'),
+            database=os.getenv('DB_NAME'),
+            user=os.getenv('DB_USER'),
+            password=os.getenv('DB_PASS')
+        )
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        site_id = os.getenv('SITE_ID', '3')
+        sql = 'SELECT * FROM "Implem.Pleasanter"."Results" WHERE "SiteId" = %s'
+        params = [site_id]
+        if start_date and end_date:
+            sql += ' AND "UpdatedTime" BETWEEN %s AND %s'
+            params += [f"{start_date} 00:00:00", f"{end_date} 23:59:59"]
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    except Exception as e:
+        print(f"Error fetching DB entries: {e}")
+        return pd.DataFrame()
+    finally:
+        if 'conn' in locals():
+            conn.close()
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df['created_at'] = pd.to_datetime(df['UpdatedTime'], errors='coerce')
+        df['date'] = df['created_at'].dt.normalize()  # 日付のみ（時間切り捨て）
+        df.rename(columns={'Body': 'content', 'Title': 'title'}, inplace=True)
+    return df
+EOF
+
+# 2-7. data_sources/stayfree_loader.py (StayFreeエクスポートCSV読み込み)
+cat > data_sources/stayfree_loader.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys, glob
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import pandas as pd
+
+def load_stayfree_data():
+    """StayFreeエクスポートCSVを読み込み結合"""
+    data_dir = os.getenv('STAYFREE_DIR', './teacher_data/stayfree_exports')
+    if not os.path.isdir(data_dir):
+        return pd.DataFrame()
+    dfs = []
+    for f in glob.glob(f"{data_dir}/*.csv"):
+        df = pd.read_csv(f)
+        # 'date'列が文字列の場合はdatetimeに変換
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df['date'] = df['date'].dt.normalize()
+        dfs.append(df)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+EOF
+
+# 2-8. data_sources/twitter_loader.py (TwitterエクスポートZIP読み込み)
+cat > data_sources/twitter_loader.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys, zipfile, json
+from datetime import datetime
+import pandas as pd
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+def load_twitter_data():
+    """Twitterデータ（ZIPアーカイブ）を読み込み、ツイート一覧のDataFrameを返す"""
+    data_dir = os.getenv('TWITTER_DIR', './teacher_data/twitter_exports')
+    if not os.path.isdir(data_dir):
+        return pd.DataFrame()
+    all_tweets = []
+    for fname in os.listdir(data_dir):
+        if fname.lower().endswith('.zip'):
+            try:
+                with zipfile.ZipFile(os.path.join(data_dir, fname)) as zp:
+                    for member in zp.namelist():
+                        if member.endswith('tweet.js') or member.endswith('tweets.js'):
+                            raw = zp.read(member).decode('utf-8')
+                            # JSONデータ部分を抽出してロード
+                            js_str = raw.partition('=')[-1].strip().rstrip(';')
+                            tweets = json.loads(js_str)
+                            all_tweets.extend(tweets)
+            except Exception as e:
+                continue
+    if not all_tweets:
+        return pd.DataFrame()
+    df = pd.json_normalize(all_tweets)
+    # 日付をdatetimeに、内容テキストをcontentに統一
+    if 'created_at' in df.columns:
+        df['created_at'] = df['created_at'].apply(
+            lambda x: datetime.strptime(x, "%a %b %d %H:%M:%S %z %Y") if isinstance(x, str) else pd.NaT
+        )
+        df['date'] = df['created_at'].dt.normalize()
+    # ツイート本文フィールドをcontentにリネーム（フルテキスト優先）
+    if 'full_text' in df.columns:
+        df.rename(columns={'full_text': 'content'}, inplace=True)
+    elif 'text' in df.columns:
+        df.rename(columns={'text': 'content'}, inplace=True)
+    return df
+EOF
+
+# 2-9. features/featurize.py (特徴量抽出処理)
+cat > features/featurize.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import pandas as pd
+from textblob import TextBlob
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+from data_sources.pleasanter import fetch_daily_entries
+from data_sources.stayfree_loader import load_stayfree_data
+from data_sources.twitter_loader import load_twitter_data
+
+def create_feature_set():
+    """StayFreeとTwitterデータから日次特徴を作成し、クラスタリングでエネルギーラベルを付与したDataFrameを返す"""
+    # データ取得
+    df_posts = fetch_daily_entries()
+    df_stay = load_stayfree_data()
+    df_tw = load_twitter_data()
+    # 日付リスト作成（各データに含まれる全日付の和集合）
+    dates = set()
+    if not df_posts.empty:
+        dates |= set(df_posts['date'].dropna().dtnormalize())
+
+...（`features/featurize.py` 以下続き）
+
+```bash
+        dates |= set(df_posts['date'].dropna().dt.normalize())
+    if not df_stay.empty:
+        dates |= set(df_stay['date'].dropna().dt.normalize())
+    if not df_tw.empty:
+        dates |= set(df_tw['date'].dropna().dt.normalize())
+    if not dates:
+        return pd.DataFrame()  # データがない場合空
+    all_dates = sorted(list(dates))
+    df_all = pd.DataFrame({'date': all_dates})
+    # StayFreeデータを日次集計
+    df_stay_feat = pd.DataFrame()
+    if not df_stay.empty:
+        # 日ごとに使用時間・起動回数を集計
+        group_stay = df_stay.dropna(subset=['date']).groupby('date')
+        usage_count = group_stay.size()  # レコード数
+        usage_total = None; usage_sessions = None
+        # 列名から使用時間と起動回数の列を推測
+        for col in df_stay.columns:
+            col_l = col.lower()
+            if usage_total is None and any(x in col_l for x in ['duration','usage','time','時間']):
+                try:
+                    usage_total = group_stay[col].sum()
+                except:
+                    usage_total = None
+            if usage_sessions is None and any(x in col_l for x in ['open','launch','起動']):
+                try:
+                    usage_sessions = group_stay[col].sum()
+                except:
+                    usage_sessions = None
+        if usage_sessions is None:
+            usage_sessions = usage_count
+        df_stay_feat = pd.DataFrame({'date': usage_count.index})
+        df_stay_feat['usage_sessions'] = usage_sessions.values
+        if usage_total is not None:
+            df_stay_feat['usage_total'] = usage_total.values
+    # Twitterデータを日次集計
+    df_tw_feat = pd.DataFrame()
+    if not df_tw.empty:
+        # 各ツイートのセンチメント・感嘆符カウントを計算
+        if 'content' in df_tw.columns:
+            df_tw['tweet_sent'] = df_tw['content'].apply(lambda x: TextBlob(str(x)).sentiment.polarity if pd.notna(x) else 0)
+            df_tw['exclamations'] = df_tw['content'].apply(lambda x: (str(x).count('!') + str(x).count('！')) if pd.notna(x) else 0)
+        else:
+            df_tw['tweet_sent'] = 0
+            df_tw['exclamations'] = 0
+        group_tw = df_tw.dropna(subset=['date']).groupby('date')
+        tweet_count = group_tw.size()
+        avg_sent = group_tw['tweet_sent'].mean() if 'tweet_sent' in df_tw else None
+        sum_excl = group_tw['exclamations'].sum() if 'exclamations' in df_tw else None
+        df_tw_feat = pd.DataFrame({'date': tweet_count.index})
+        df_tw_feat['tweet_count'] = tweet_count.values
+        df_tw_feat['tweet_sentiment'] = avg_sent.values if avg_sent is not None else 0
+        df_tw_feat['tweet_exclamations'] = sum_excl.values if sum_excl is not None else 0
+    # 結合: 全日付ベースにStayFreeとTwitter特徴をマージ
+    df_features = df_all.copy()
+    if not df_stay_feat.empty:
+        df_features = df_features.merge(df_stay_feat, on='date', how='left')
+    if not df_tw_feat.empty:
+        df_features = df_features.merge(df_tw_feat, on='date', how='left')
+    df_features.fillna(0, inplace=True)
+    # 必要な特徴量列を抽出（date以外）
+    feature_cols = [col for col in df_features.columns if col != 'date']
+    if not feature_cols:
+        return pd.DataFrame()
+    X = df_features[feature_cols].values
+    # 特徴量を標準化してクラスタリング
+    X_scaled = StandardScaler().fit_transform(X)
+    kmeans = KMeans(n_clusters=2, n_init='auto', random_state=0)
+    labels = kmeans.fit_predict(X_scaled)
+    df_features['cluster'] = labels
+    # クラスターの平均値からラベル(活動的=1, 低調=0)を決定
+    cluster_means = df_features.groupby('cluster')[feature_cols].mean()
+    score = {}
+    for cluster in cluster_means.index:
+        # 使用頻度と投稿数の合計でスコアリング
+        score[cluster] = 0
+        if 'usage_sessions' in cluster_means.columns:
+            score[cluster] += cluster_means.loc[cluster, 'usage_sessions']
+        if 'usage_total' in cluster_means.columns:
+            score[cluster] += cluster_means.loc[cluster, 'usage_total'] / 60.0  # 分→時間換算で加算
+        if 'tweet_count' in cluster_means.columns:
+            score[cluster] += cluster_means.loc[cluster, 'tweet_count']
+        if 'tweet_exclamations' in cluster_means.columns:
+            score[cluster] += cluster_means.loc[cluster, 'tweet_exclamations']
+    # スコアが高い方を活動的(1)とする
+    active_cluster = max(score, key=score.get)
+    low_cluster = [c for c in score.keys() if c != active_cluster][0] if len(score) > 1 else (1-active_cluster)
+    df_features['energy_label'] = df_features['cluster'].apply(lambda c: 1 if c == active_cluster else 0)
+    return df_features
+EOF
+
+# 2-10. models/predictor.py (モデル学習・予測処理)
+cat > models/predictor.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys, pickle
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from features.featurize import create_feature_set
+from data_sources.pleasanter import fetch_daily_entries
+from textblob import TextBlob
+
+MODEL_PATH = os.getenv('MODEL_DIR', './models') + '/health_model.pkl'
+
+def train_model():
+    """特徴量抽出とモデル学習を行い、モデルを保存"""
+    df_feat = create_feature_set()
+    if df_feat.empty or 'energy_label' not in df_feat.columns:
+        print("No data available for training.")
+        return
+    # Pleasanter投稿を日次で集約（同日複数投稿は結合）
+    df_posts = fetch_daily_entries()
+    if df_posts.empty:
+        print("No Pleasanter data for training.")
+        return
+    # 日付単位にタイトル・本文を統合しエントリ数を算出
+    df_posts_grouped = df_posts.groupby('date').agg({
+        'title': lambda x: ' | '.join([str(t) for t in x if pd.notna(t)]),
+        'content': lambda x: ' '.join([str(c) for c in x if pd.notna(c)]),
+        'ResultId': lambda x: ','.join(map(str, x)),
+    }).reset_index()
+    df_posts_grouped['entry_count'] = df_posts_grouped['ResultId'].apply(lambda s: len(str(s).split(',')) if pd.notna(s) else 0)
+    # ラベルをマージ
+    df_train = pd.merge(df_posts_grouped, df_feat[['date','energy_label']], on='date', how='inner')
+    if df_train.empty:
+        print("No matching data for training after merge.")
+        return
+    # テキスト特徴量を計算
+    df_train['content_sentiment'] = df_train['content'].apply(lambda x: TextBlob(str(x)).sentiment.polarity if pd.notna(x) else 0)
+    df_train['content_length'] = df_train['content'].astype(str).apply(len)
+    # ポジティブ/ネガティブ単語リスト
+    pos_words = ["楽しい","嬉しい","元気","良い","最高","充実","楽しかった","良かった"]
+    neg_words = ["疲れた","悲しい","辛い","最悪","ネガティブ","しんどい","だるい","やる気がない"]
+    df_train['pos_count'] = df_train['content'].astype(str).apply(lambda text: sum(text.count(w) for w in pos_words))
+    df_train['neg_count'] = df_train['content'].astype(str).apply(lambda text: sum(text.count(w) for w in neg_words))
+    df_train['exclamations'] = df_train['content'].astype(str).apply(lambda text: text.count('!') + text.count('！'))
+    # 学習用の説明変数Xと目的変数yを準備
+    feature_cols = ['entry_count', 'content_length', 'content_sentiment', 'pos_count', 'neg_count', 'exclamations']
+    # スケーリングやベクトル化は簡易のため省略し、そのままロジスティック回帰へ
+    X = df_train[feature_cols].values
+    # content_lengthは桁が大きいので若干スケール調整
+    for i, col in enumerate(feature_cols):
+        if col == 'content_length':
+            X[:, i] = X[:, i] / 100.0
+    y = df_train['energy_label'].values
+    model = LogisticRegression(max_iter=1000, random_state=0)
+    model.fit(X, y)
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    with open(MODEL_PATH, 'wb') as f:
+        pickle.dump(model, f)
+    print("Model trained and saved.")
+
+def predict():
+    """学習済みモデルを用いてPleasanter投稿の日次エネルギー予測を実施し、結果DataFrameを返す"""
+    # モデルが無ければ学習を実行
+    if not os.path.isfile(MODEL_PATH):
+        train_model()
+    if not os.path.isfile(MODEL_PATH):
+        return pd.DataFrame()
+    with open(MODEL_PATH, 'rb') as f:
+        model = pickle.load(f)
+    df_posts = fetch_daily_entries()
+    if df_posts.empty:
+        return pd.DataFrame()
+    df_posts_grouped = df_posts.groupby('date').agg({
+        'title': lambda x: ' | '.join([str(t) for t in x if pd.notna(t)]),
+        'content': lambda x: ' '.join([str(c) for c in x if pd.notna(c)]),
+        'ResultId': lambda x: ','.join(map(str, x)),
+    }).reset_index()
+    df_posts_grouped['entry_count'] = df_posts_grouped['ResultId'].apply(lambda s: len(str(s).split(',')) if pd.notna(s) else 0)
+    # テキスト特徴量抽出（モデルと同じ処理）
+    df_posts_grouped['content_sentiment'] = df_posts_grouped['content'].apply(lambda x: TextBlob(str(x)).sentiment.polarity if pd.notna(x) else 0)
+    df_posts_grouped['content_length'] = df_posts_grouped['content'].astype(str).apply(len)
+    pos_words = ["楽しい","嬉しい","元気","良い","最高","充実","楽しかった","良かった"]
+    neg_words = ["疲れた","悲しい","辛い","最悪","ネガティブ","しんどい","だるい","やる気がない"]
+    df_posts_grouped['pos_count'] = df_posts_grouped['content'].astype(str).apply(lambda text: sum(text.count(w) for w in pos_words))
+    df_posts_grouped['neg_count'] = df_posts_grouped['content'].astype(str).apply(lambda text: sum(text.count(w) for w in neg_words))
+    df_posts_grouped['exclamations'] = df_posts_grouped['content'].astype(str).apply(lambda text: text.count('!') + text.count('！'))
+    # 予測
+    feature_cols = ['entry_count', 'content_length', 'content_sentiment', 'pos_count', 'neg_count', 'exclamations']
+    X = df_posts_grouped[feature_cols].values
+    for i, col in enumerate(feature_cols):
+        if col == 'content_length':
+            X[:, i] = X[:, i] / 100.0
+    probs = model.predict_proba(X)[:, 1]  # クラス1(活動的)の確率
+    preds = model.predict(X)
+    df_posts_grouped['pred_energy'] = probs
+    df_posts_grouped['power_state'] = preds
+    df_posts_grouped['power_state'] = df_posts_grouped['power_state'].map({1: '活動的', 0: '低調'})
+    return df_posts_grouped
+EOF
+
+# 2-11. strategies/train.py (モデル学習エントリポイント)
+cat > strategies/train.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
+sys.path.insert(0, PROJECT_ROOT)
+
+from models.predictor import train_model
+
+if __name__ == '__main__':
+    train_model()
+EOF
+
+# 2-12. strategies/predict.py (予測エントリポイント)
+cat > strategies/predict.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
+sys.path.insert(0, PROJECT_ROOT)
+
+from models.predictor import predict
+
+if __name__ == '__main__':
+    df = predict()
+    print(df.to_csv(index=False))
+EOF
+
+# 2-13. dashboard/app.py (Dashダッシュボードアプリ)
+cat > dashboard/app.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+
+import dash
+from dash import dcc, html, dash_table
+import pandas as pd
+import plotly.express as px
+
+from strategies.predict import predict
+
+def main():
+    df = predict()
+    if df.empty:
+        return
+    df = df.sort_values('date')
+    # グラフ用データ準備
+    # 日別バー (活動度推移)
+    fig1 = px.bar(
+        df, x='date', y='pred_energy', color='power_state',
+        title='日々の活動度',
+        labels={'date': '日付', 'pred_energy': 'エネルギーレベル', 'power_state': '状態'}
+    )
+    fig1.update_layout(barmode='group', xaxis=dict(type='category'))
+    # カレンダーヒートマップ
+    try:
+        import plotly_calplot
+        fig2 = plotly_calplot.calplot(
+            df, x='date', y='pred_energy',
+            colorscale='RdYlGn', title='エネルギーカレンダー'
+        )
+    except ImportError:
+        df['month'] = df['date'].dt.month
+        df['day'] = df['date'].dt.day
+        pivot = df.pivot_table(index='month', columns='day', values='pred_energy', aggfunc='mean')
+        fig2 = px.imshow(pivot, origin='lower', color_continuous_scale='RdYlGn',
+                         labels={'color': 'エネルギー'}, title='エネルギー ヒートマップ')
+    # DataTable用に列名を設定（日本語）
+    df_display = df.copy()
+    df_display = df_display[['date', 'power_state', 'pred_energy', 'entry_count', 'title', 'content', 'ResultId']]
+    df_display.columns = ['日付', '状態', 'エネルギーレベル', '件数', 'タイトル', '内容', 'ID']
+    app = dash.Dash(__name__)
+    app.layout = html.Div([
+        html.H1("健康ダッシュボード"),
+        dcc.Graph(figure=fig1),
+        dcc.Graph(figure=fig2),
+        html.H2("投稿データ一覧"),
+        dash_table.DataTable(
+            columns=[{'name': c, 'id': c} for c in df_display.columns],
+            data=df_display.to_dict('records'),
+            page_size=10,
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left', 'padding': '4px'},
+            style_header={'backgroundColor': '#f0f0f0', 'fontWeight': 'bold'}
+        )
+    ], style={'padding': '20px'})
+    app.run(host='0.0.0.0', port=8060, debug=True)
+
+if __name__ == '__main__':
+    main()
+EOF
+
+# 2-14. entrypoint.sh （コンテナ起動時のエントリポイント）
+cat > entrypoint.sh << 'EOF'
+#!/bin/sh
+set -e
+echo "▶ Running train.py..."
+python /myhealth/strategies/train.py
+echo "▶ Starting Dash on 8060..."
+exec python /myhealth/dashboard/app.py
+EOF
+chmod +x entrypoint.sh
+
+# 2-15. Dockerfile （コンテナイメージビルド設定）
+cat > Dockerfile << 'EOF'
+FROM python:3.11-slim
+WORKDIR /myhealth
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+EXPOSE 8060
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python","/myhealth/dashboard/app.py"]
+EOF
+
+########################################
+# 3. 操作セクション（セットアップ & 起動）
+########################################
+# docker-compose.yml を生成
+cat > docker-compose.yml <<EOF
+version: '3.8'
+services:
+  app:
+    build: .
+    container_name: ${PROJECT_NAME}
+    ports:
+      - "8060:8060"
+    volumes:
+EOF
+for vol in "${VOLUMES[@]}"; do
+  echo "      - \"$vol\"" >> docker-compose.yml
+done
+cat >> docker-compose.yml <<EOF
+    environment:
+      DB_HOST: "pleasanter_postgres"
+      DB_PORT: "5432"
+      DB_NAME: "Implem.Pleasanter"
+      DB_USER: "postgres"
+      DB_PASS: "MyStrongPostgresPass!"
+      SITE_ID: "3"
+      STAYFREE_DIR: "${CNTR_TEACHER_DIR}/stayfree_exports"
+      TWITTER_DIR: "${CNTR_TEACHER_DIR}/twitter_exports"
+      MODEL_DIR: "${CNTR_MODEL_DIR}"
+    networks:
+      - pleasanter-net
+networks:
+  pleasanter-net:
+    external: true
+    name: pleasanterDocker_default
+EOF
+
+# ビルド & 起動
+echo "▶ Dockerイメージをビルド"
+docker compose build --no-cache --pull
+echo "▶ コンテナを起動"
+docker compose up -d
+
+echo "✅ Setup 完了: http://localhost:8060"

@@ -7,3 +7,6 @@ python-dotenv
 textblob
 plotly
 plotly-calplot
+scipy
+matplotlib
+wordcloud

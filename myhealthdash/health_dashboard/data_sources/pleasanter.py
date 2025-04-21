@@ -37,5 +37,5 @@ def fetch_daily_entries(start_date=None, end_date=None):
     if not df.empty:
         df['created_at'] = pd.to_datetime(df['UpdatedTime'], errors='coerce')
         df['date'] = df['created_at'].dt.normalize()
-        df.rename(columns={'Body':'content','Title':'title'}, inplace=True)
+        df.rename(columns={'Body': 'content', 'Title': 'title'}, inplace=True)
     return df

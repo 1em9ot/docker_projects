@@ -10,4 +10,4 @@ __init__.py
 /bitcoin/.env
 /bitcoin/trade/.env
 
-/health_dashboard/teacher_data/*
+/health_dashboard/teacher_data/

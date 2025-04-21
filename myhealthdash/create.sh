@@ -1,61 +1,66 @@
 #!/usr/bin/env bash
-# create.sh ―― health_dashboard プロジェクト＋Docker構成を一括スキャフォールド＆起動
-# フルコード／エラー対策付き
-
 set -euo pipefail
 
-########################################
-# 1. 変数定義（ホスト／コンテナ パス）
-########################################
-BASE_DIR=$(pwd)
+# -----------------------------------------------------------------------------
+# 事前準備: ホストの UID/GID を取得、防止 .pyc 自動生成
+# -----------------------------------------------------------------------------
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+export PYTHONDONTWRITEBYTECODE=1
+
+# -----------------------------------------------------------------------------
+# 変数定義
+# -----------------------------------------------------------------------------
+BASE_DIR="$(pwd)"
 PROJECT_NAME="health_dashboard"
 PROJECT_ROOT="${BASE_DIR}/${PROJECT_NAME}"
 
-# ホスト側ディレクトリ
 HOST_TEACHER_DIR="${BASE_DIR}/teacher_data"
-
-# コンテナ内ディレクトリ
 CNTR_TEACHER_DIR="/myhealth/teacher_data"
 CNTR_MODEL_DIR="/myhealth/models"
 CNTR_DATA_DIR="/myhealth/data"
 CNTR_DASHBOARD_DIR="/myhealth/dashboard"
 
-# Docker Compose volumes 定義 (ホスト:コンテナ)
 VOLUMES=(
   "${HOST_TEACHER_DIR}:${CNTR_TEACHER_DIR}"
-  "./models:${CNTR_MODEL_DIR}"
-  "./data:${CNTR_DATA_DIR}"
-  "./dashboard:${CNTR_DASHBOARD_DIR}"
+  "${PROJECT_ROOT}/models:${CNTR_MODEL_DIR}"
+  "${PROJECT_ROOT}/data:${CNTR_DATA_DIR}"
+  "${PROJECT_ROOT}/dashboard:${CNTR_DASHBOARD_DIR}"
 )
 
-########################################
-# 2. プログラム生成セクション
-########################################
-# 2-1. teacher_data フォルダ確認
-if [ ! -d "${HOST_TEACHER_DIR}" ]; then
-  echo "‼️ Error: ${HOST_TEACHER_DIR} が見つかりません。配置を確認してください。"
+# -----------------------------------------------------------------------------
+# 1. teacher_data フォルダの存在チェック
+# -----------------------------------------------------------------------------
+if [ ! -d "$HOST_TEACHER_DIR" ]; then
+  echo "‼️ Error: $HOST_TEACHER_DIR が見つかりません。教師データを配置してください。"
   exit 1
 fi
 
-# 2-2. 既存プロジェクトクリア
-if [ -d "${PROJECT_ROOT}" ]; then
-  echo "▶ 既存プロジェクトを削除: ${PROJECT_ROOT}"
-  (cd "${PROJECT_ROOT}" && docker compose down --volumes) || true
-  rm -rf "${PROJECT_ROOT}"
+# -----------------------------------------------------------------------------
+# 2. 既存プロジェクト削除
+# -----------------------------------------------------------------------------
+if [ -d "$PROJECT_ROOT" ]; then
+  echo "▶ 既存プロジェクトを削除: $PROJECT_ROOT"
+  (cd "$PROJECT_ROOT" && docker compose down --volumes) || true
+  echo "▶ __pycache__ 対策: 削除時の Permission denied を無視します"
+  rm -rf "$PROJECT_ROOT" 2>/dev/null || true
 fi
 
-# 2-3. プロジェクト構造作成
-echo "▶ プロジェクト構造作成: ${PROJECT_ROOT}"
-mkdir -p "${PROJECT_ROOT}"
-cd "${PROJECT_ROOT}"
+# -----------------------------------------------------------------------------
+# 3. プロジェクト構造作成
+# -----------------------------------------------------------------------------
+echo "▶ プロジェクト構造作成: $PROJECT_ROOT"
+mkdir -p \
+  "${PROJECT_ROOT}/data_sources" \
+  "${PROJECT_ROOT}/features" \
+  "${PROJECT_ROOT}/strategies" \
+  "${PROJECT_ROOT}/models" \
+  "${PROJECT_ROOT}/dashboard"
 
-for pkg in data_sources features strategies models dashboard; do
-  mkdir -p "$pkg"
-  touch "$pkg/__init__.py"
-done
-
-# 2-4. .env
-cat > .env <<EOF
+# -----------------------------------------------------------------------------
+# 4. .env ファイル生成
+# -----------------------------------------------------------------------------
+cat > "${PROJECT_ROOT}/.env" <<EOF
 DB_HOST=pleasanter_postgres
 DB_PORT=5432
 DB_NAME=Implem.Pleasanter
@@ -66,6 +71,20 @@ STAYFREE_DIR=${CNTR_TEACHER_DIR}/stayfree_exports
 TWITTER_DIR=${CNTR_TEACHER_DIR}/twitter_exports
 MODEL_DIR=${CNTR_MODEL_DIR}
 EOF
+
+# -----------------------------------------------------------------------------
+# 5. 外部ネットワークの存在確認＆作成
+# -----------------------------------------------------------------------------
+NETWORK_NAME="pleasanterDocker_default"
+if ! docker network ls --filter name="^${NETWORK_NAME}$" --format '{{.Name}}' | grep -q "^${NETWORK_NAME}$"; then
+  echo "▶ Docker network ${NETWORK_NAME} が存在しないため作成します。"
+  docker network create "${NETWORK_NAME}"
+fi
+
+# -----------------------------------------------------------------------------
+# 6. コード生成セクション
+# -----------------------------------------------------------------------------
+cd "${PROJECT_ROOT}"
 
 # 2-5. requirements.txt
 cat > requirements.txt <<EOF
@@ -78,6 +97,9 @@ python-dotenv
 textblob
 plotly
 plotly-calplot
+scipy
+matplotlib
+wordcloud
 EOF
 
 # 2-6. data_sources/pleasanter.py
@@ -121,7 +143,7 @@ def fetch_daily_entries(start_date=None, end_date=None):
     if not df.empty:
         df['created_at'] = pd.to_datetime(df['UpdatedTime'], errors='coerce')
         df['date'] = df['created_at'].dt.normalize()
-        df.rename(columns={'Body':'content','Title':'title'}, inplace=True)
+        df.rename(columns={'Body': 'content', 'Title': 'title'}, inplace=True)
     return df
 EOF
 
@@ -147,7 +169,7 @@ def load_stayfree_data():
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 EOF
 
-# 2-8. data_sources/twitter_loader.py (エラー対策追加)
+# 2-8. data_sources/twitter_loader.py
 cat > data_sources/twitter_loader.py << 'EOF'
 #!/usr/bin/env python3
 import os, sys, zipfile, json
@@ -181,7 +203,7 @@ def load_twitter_data():
             lambda x: datetime.strptime(x, "%a %b %d %H:%M:%S %z %Y") if isinstance(x, str) else pd.NaT
         )
         df['date'] = df['created_at'].dt.normalize()
-    df.rename(columns={'full_text':'content','text':'content'}, inplace=True)
+    df.rename(columns={'full_text': 'content', 'text': 'content'}, inplace=True)
     return df
 EOF
 
@@ -254,6 +276,7 @@ def predict():
     pred = model.predict(X)
     df['pred_sentiment'] = pred
     df['pred_energy'] = pred
+    df['energy_state'] = df['pred_energy'].apply(lambda x: 'Active' if x >= 0 else 'Low')
     return df
 EOF
 
@@ -289,60 +312,86 @@ EOF
 # 2-13. dashboard/app.py
 cat > dashboard/app.py << 'EOF'
 #!/usr/bin/env python3
-import os, sys
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
-
+import os, sys, json
+from datetime import datetime
+import pandas as pd
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.cluster import KMeans
 import dash
 from dash import dcc, html, dash_table
-import pandas as pd
 import plotly.express as px
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from strategies.predict import predict
+
+def sanitize_records(df):
+    records = []
+    for row in df.to_dict('records'):
+        new = {}
+        for k,v in row.items():
+            if pd.isna(v):
+                new[k] = ''
+            else:
+                new[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict,list)) else v
+        records.append(new)
+    return records
+
+def cluster_emotion_keywords(df, top_k=50):
+    df_tw = df[df['title'].str.contains("Twitter", na=False)]
+    if df_tw.empty: return {'anger':[], 'sad':[], 'calm':[]}
+    cnt = CountVectorizer(token_pattern=r'(?u)\b\w+\b', max_features=top_k)
+    X = cnt.fit_transform(df_tw['content'].dropna().astype(str))
+    words = cnt.get_feature_names_out()
+    counts = X.toarray().sum(axis=0).reshape(-1,1)
+    labels = KMeans(n_clusters=3, random_state=42).fit_predict(counts)
+    clusters = {i:[] for i in range(3)}
+    for w,l in zip(words, labels): clusters[l].append(w)
+    return {'anger':clusters[0], 'sad':clusters[1], 'calm':clusters[2]}
+
+def classify_emotion(text, emo_dict):
+    for label, words in emo_dict.items():
+        if any(w in text for w in words): return label
+    return 'neutral'
 
 def main():
     df = predict()
     if df.empty:
-        return
-    df = df.sort_values('date')
-    fig1 = px.line(
-        df, x='date', y='pred_sentiment', markers=True,
-        hover_data=['date','pred_sentiment','ResultId','title'], title='Sentiment over Time'
-    )
-    fig2 = px.line(
-        df, x='date', y='pred_energy', markers=True,
-        hover_data=['date','pred_energy','ResultId','title'], title='Energy over Time'
-    )
-    try:
-        import plotly_calplot
-        fig3 = plotly_calplot.calplot(
-            df, x='date', y='pred_energy', colorscale='RdYlGn', title='Energy Calendar'
-        )
-    except ImportError:
-        df['m'], df['d'] = df['date'].dt.month, df['date'].dt.day
-        pivot = df.pivot_table(
-            index='m', columns='d', values='pred_energy', aggfunc='mean'
-        )
-        fig3 = px.imshow(pivot, origin='lower', labels={'color':'Energy'}, title='Energy Heatmap')
+        print("No data to display."); exit
+
+    emo_dict = cluster_emotion_keywords(df)
+    df['emotion'] = df['content'].apply(lambda t: classify_emotion(t, emo_dict))
+
+    df['date'] = pd.to_datetime(df['date'])
+    last_month = df['date'].dt.month.max()
+    dm = df[df['date'].dt.month==last_month].copy()
+    dm['day'] = dm['date'].dt.day
+    daily = dm.groupby('day')['pred_energy'].mean().reset_index()
+
+    fig1 = px.bar(daily, x='day', y='pred_energy',
+                  title=f'Avg Energy Month {last_month}', range_y=[-1,1])
+    table = sanitize_records(df)
+    styles = [
+      {'if':{'filter_query':f'{{emotion}}="{e}"','column_id':'content'},
+       'backgroundColor':c}
+      for e,c in zip(['anger','sad','calm','neutral'],
+                     ['#ffcccc','#cce5ff','#ccffcc','#ffffff'])
+    ]
+
     app = dash.Dash(__name__)
     app.layout = html.Div([
-        html.H1("Health Dashboard"),
-        dcc.Graph(figure=fig1),
-        dcc.Graph(figure=fig2),
-        dcc.Graph(figure=fig3),
-        html.H2("Raw Entries"),
-        dash_table.DataTable(
-            columns=[{'name':c,'id':c} for c in df.columns],
-            data=df.to_dict('records'),
-            page_size=10,
-            style_table={'overflowX':'auto'},
-            style_cell={'textAlign':'left','padding':'4px'},
-            style_header={'backgroundColor':'#f0f0f0','fontWeight':'bold'}
-        )
+      html.H1("Health Dashboard"),
+      dcc.Graph(figure=fig1),
+      html.H2("Entries"),
+      dash_table.DataTable(
+        columns=[{'name':col,'id':col} for col in df.columns],
+        data=table, page_size=10,
+        style_data_conditional=styles
+      )
     ], style={'padding':'20px'})
+
     app.run(host='0.0.0.0', port=8060, debug=True)
 
-if __name__ == '__main__':
+if __name__=='__main__':
     main()
 EOF
 
@@ -352,7 +401,7 @@ cat > entrypoint.sh << 'EOF'
 set -e
 echo "▶ Running train.py..."
 python /myhealth/strategies/train.py
-echo "▶ Starting Dash on 8060..."
+echo "▶ Starting Dash..."
 exec python /myhealth/dashboard/app.py
 EOF
 chmod +x entrypoint.sh
@@ -361,7 +410,7 @@ chmod +x entrypoint.sh
 cat > Dockerfile << 'EOF'
 FROM python:3.11-slim
 WORKDIR /myhealth
-COPY requirements.txt ./
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 COPY entrypoint.sh /entrypoint.sh
@@ -371,10 +420,9 @@ ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python","/myhealth/dashboard/app.py"]
 EOF
 
-########################################
-# 3. 操作セクション（セットアップ & 起動）
-########################################
-# docker-compose.yml を生成
+# -----------------------------------------------------------------------------
+# 7. docker-compose.yml 生成＆起動
+# -----------------------------------------------------------------------------
 cat > docker-compose.yml <<EOF
 version: '3.8'
 services:
@@ -384,34 +432,26 @@ services:
     ports:
       - "8060:8060"
     volumes:
-EOF
-for vol in "${VOLUMES[@]}"; do
-  echo "      - \"$vol\"" >> docker-compose.yml
-done
-cat >> docker-compose.yml <<EOF
+$(printf '      - %s\n' "${VOLUMES[@]}")
+    user: "${HOST_UID}:${HOST_GID}"
+    env_file:
+      - .env
     environment:
-      DB_HOST: "pleasanter_postgres"
-      DB_PORT: "5432"
-      DB_NAME: "Implem.Pleasanter"
-      DB_USER: "postgres"
-      DB_PASS: "MyStrongPostgresPass!"
-      SITE_ID: "3"
-      STAYFREE_DIR: "${CNTR_TEACHER_DIR}/stayfree_exports"
-      TWITTER_DIR: "${CNTR_TEACHER_DIR}/twitter_exports"
-      MODEL_DIR: "${CNTR_MODEL_DIR}"
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
     networks:
       - pleasanter-net
+
 networks:
   pleasanter-net:
     external: true
-    name: pleasanterDocker_default
+    name: ${NETWORK_NAME}
 EOF
 
-# ビルド & 起動
-
-echo "▶ Docker イメージをビルド"
+echo "▶ Building Docker image..."
 docker compose build --no-cache --pull
-echo "▶ コンテナを起動"
+
+echo "▶ Starting containers..."
 docker compose up -d
 
-echo "✅ Setup 完了: http://localhost:8060"
+echo "✅ Ready: http://localhost:8060"

@@ -6,22 +6,19 @@ services:
     ports:
       - "8060:8060"
     volumes:
-      - "/home/user/docker_projects/myhealthdash/teacher_data:/myhealth/teacher_data"
-      - "./models:/myhealth/models"
-      - "./data:/myhealth/data"
-      - "./dashboard:/myhealth/dashboard"
+      - /home/user/docker_projects/myhealthdash/teacher_data:/myhealth/teacher_data
+      - /home/user/docker_projects/myhealthdash/health_dashboard/models:/myhealth/models
+      - /home/user/docker_projects/myhealthdash/health_dashboard/data:/myhealth/data
+      - /home/user/docker_projects/myhealthdash/health_dashboard/dashboard:/myhealth/dashboard
+    user: "1000:1000"
+    env_file:
+      - .env
     environment:
-      DB_HOST: "pleasanter_postgres"
-      DB_PORT: "5432"
-      DB_NAME: "Implem.Pleasanter"
-      DB_USER: "postgres"
-      DB_PASS: "MyStrongPostgresPass!"
-      SITE_ID: "3"
-      STAYFREE_DIR: "/myhealth/teacher_data/stayfree_exports"
-      TWITTER_DIR: "/myhealth/teacher_data/twitter_exports"
-      MODEL_DIR: "/myhealth/models"
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
     networks:
       - pleasanter-net
+
 networks:
   pleasanter-net:
     external: true

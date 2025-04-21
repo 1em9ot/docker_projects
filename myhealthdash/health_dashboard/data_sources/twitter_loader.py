@@ -30,5 +30,5 @@ def load_twitter_data():
             lambda x: datetime.strptime(x, "%a %b %d %H:%M:%S %z %Y") if isinstance(x, str) else pd.NaT
         )
         df['date'] = df['created_at'].dt.normalize()
-    df.rename(columns={'full_text':'content','text':'content'}, inplace=True)
+    df.rename(columns={'full_text': 'content', 'text': 'content'}, inplace=True)
     return df
