@@ -100,3 +100,4 @@ def load_twitter_data() -> pd.DataFrame:
 
     # 不要列を落として返す
     return df[['date', 'content', 'title', 'created_at']].copy()
+
