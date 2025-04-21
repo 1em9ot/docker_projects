@@ -11,3 +11,5 @@ __init__.py
 /bitcoin/trade/.env
 
 /health_dashboard/teacher_data/
+myhealthdash/repo.git/
+myhealthdash/teacher_data/twitter_exports/*.zip
