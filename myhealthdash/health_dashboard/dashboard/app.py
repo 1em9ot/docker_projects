@@ -30,12 +30,12 @@ from plotly.subplots import make_subplots
 
 # ―― transformers で事前学習済み日本語 BERT を利用 ──────────────────
 from transformers import pipeline, Pipeline
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ── sys.path を最初に通す ───────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
-from data_sources.twitter_loader import load_twitter_data  # 自作ローダー
-
+# ここから下で data_sources.* を import しても OK
+from data_sources.twitter_loader import load_twitter_data
+from data_sources.pleasanter import fetch_daily_entries
 # ── フォント（Noto Sans CJK）が入っている前提 ────────────
 JP_FONT = "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
 
@@ -175,6 +175,26 @@ def classify_emotion(text: str) -> str:
 
 def main():
     df = load_twitter_data()
+    # ───────────────── Pleasanter データ ─────────────────
+    df_pl = fetch_daily_entries()
+    if not df_pl.empty and 'content' in df_pl.columns:
+        # JST → hour 抽出（twitter_loader と揃える）
+        df_pl['hour'] = df_pl['created_at'].dt.hour
+        pl_hour_stats = (df_pl.groupby('hour')
+                           .size()
+                           .reindex(range(24), fill_value=0)
+                           .reset_index(name='record_count'))
+
+        # ★ グラフ（時間帯別レコード数）
+        fig_pl_hour = px.bar(
+            pl_hour_stats, x='hour', y='record_count',
+            title='Pleasanter 時間帯別レコード数',
+            labels={'hour':'時間帯 (時)', 'record_count':'レコード数'},
+            color='record_count', color_continuous_scale='Blues'
+        )
+    else:
+        fig_pl_hour = None
+
     if df.empty or 'content' not in df.columns:
         print("No Twitter data.")
         return
@@ -227,6 +247,24 @@ def main():
     app.layout = html.Div(
         style={'padding': '20px'},
         children=[
+            # ------ Pleasanter セクション -----------------
+            html.H2("Pleasanter 時間帯別レコード数"),
+            dcc.Graph(figure=fig_pl_hour) if fig_pl_hour else html.P("※レコードなし"),
+
+            html.H2("Pleasanter レコード一覧"),
+            dash_table.DataTable(
+                columns=[{'name':'日時','id':'created_at'},
+                         {'name':'タイトル','id':'title'},
+                         {'name':'内容','id':'content'}],
+                data=sanitize_records(
+                    df_pl[['created_at','title','content']] if not df_pl.empty else pd.DataFrame()
+                ),
+                page_action='none',
+                style_table={'height':'500px','overflowY':'auto','overflowX':'auto'},
+                style_cell={'textAlign':'left','padding':'4px'},
+                style_header={'backgroundColor':'#f0f0f0','fontWeight':'bold'},
+                virtualization=True
+            ),
             html.H1("Health Dashboard"),
             html.H2("Twitterワードクラウド"),
             html.Img(src=wc_uri, style={'width': '100%', 'maxHeight': '400px'})
