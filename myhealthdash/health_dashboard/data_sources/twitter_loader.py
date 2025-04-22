@@ -71,13 +71,20 @@ def load_twitter_data() -> pd.DataFrame:
     df = pd.json_normalize(tweets)
 
     # ── created_at / date 列作成 ──────────────────
-    created_col = _pick_first(df, ['created_at', 'tweet.created_at', 'legacy.created_at'])
+    created_col = _pick_first(df, [
+        'created_at', 'tweet.created_at', 'legacy.created_at'
+    ])
+
     if created_col:
-        try:
-            df['created_at'] = pd.to_datetime(df[created_col], format=DT_FMT, errors='coerce')
-        except Exception:
-            # フォーマット非一致は個別パースへフォールバック
-            df['created_at'] = pd.to_datetime(df[created_col], errors='coerce')
+        # ① まず UTC で読む      （Twitter Export は +0000 付き）
+        created_utc = pd.to_datetime(
+            df[created_col], format=DT_FMT, errors='coerce', utc=True
+        )
+
+        # ② JST (Asia/Tokyo) に変換
+        df['created_at'] = created_utc.dt.tz_convert('Asia/Tokyo')
+
+        # ③ 0 時切り捨てで date 列
         df['date'] = df['created_at'].dt.normalize()
 
     # ── content 列作成 ────────────────────────────
@@ -100,4 +107,5 @@ def load_twitter_data() -> pd.DataFrame:
 
     # 不要列を落として返す
     return df[['date', 'content', 'title', 'created_at']].copy()
+
 

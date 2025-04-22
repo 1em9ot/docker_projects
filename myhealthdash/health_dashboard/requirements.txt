@@ -10,3 +10,11 @@ plotly-calplot
 scipy
 matplotlib
 wordcloud
+# ── transformers 依存 ───────────────────────────
+torch                 # CPU 版 wheel
+transformers
+sentencepiece
+accelerate
+protobuf>=3.20,<4.0
+# ── ★ 追加：MeCab tokenizer 用 ──────────────────
+fugashi[unidic-lite]  # Pure‑Python版辞書。同梱でOK
