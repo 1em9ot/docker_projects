@@ -46,9 +46,14 @@ class MLP(nn.Module):
 # ── 学習関数 ───────────────────────────────────────
 def train_model(num_epochs: int = 300, batch_size: int = 64) -> None:
     X, y = load_feature_matrix()
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=SEED
-    )
+    try:
+        X_tr, X_val, y_tr, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=SEED
+        )
+    except ValueError as e:
+        print(f"[WARN] train_test_split でエラー ({e}) → 学習をスキップします")
+        return
+
 
     tr_ds = torch.utils.data.TensorDataset(
         torch.tensor(X_tr), torch.tensor(y_tr)
@@ -113,3 +118,4 @@ def predict(X: np.ndarray) -> np.ndarray:
     with torch.no_grad():
         X_t = torch.tensor(X, dtype=torch.float32, device=DEVICE)
         return _model_cache(X_t).cpu().numpy()
+

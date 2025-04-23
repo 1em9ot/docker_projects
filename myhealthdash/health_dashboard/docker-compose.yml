@@ -17,7 +17,7 @@ services:
       - HF_HOME=/tmp/hfcache
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
-        - STOPWORD_PATH=/teacher_data/stopwords.txt
+      - STOPWORD_PATH=/teacher_data/stopwords.txt
     networks:
       - pleasanter-net
 

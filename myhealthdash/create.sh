@@ -55,7 +55,9 @@ mkdir -p \
   "${PROJECT_ROOT}/features" \
   "${PROJECT_ROOT}/strategies" \
   "${PROJECT_ROOT}/models" \
-  "${PROJECT_ROOT}/dashboard"
+  "${PROJECT_ROOT}/dashboard" \
+  "${PROJECT_ROOT}/data"
+chown -R "$HOST_UID:$HOST_GID" "${PROJECT_ROOT}/data"
 
 # -----------------------------------------------------------------------------
 # 4. .env ファイル生成
@@ -100,30 +102,31 @@ plotly-calplot
 scipy
 matplotlib
 wordcloud
-# ── transformers 依存 ───────────────────────────
-torch                 # CPU 版 wheel
+torch
 transformers
 sentencepiece
 accelerate
 protobuf>=3.20,<4.0
-# ── ★ 追加：MeCab tokenizer 用 ──────────────────
-fugashi[unidic-lite]  # Pure‑Python版辞書。同梱でOK
+fugashi[unidic-lite]
+torchmetrics>=1.4
 EOF
 
-# 2-6. data_sources/pleasanter.py
+# ───────────────────────────────────────────────────────────────
+# 2-6. data_sources/pleasanter.py を生成
+# ───────────────────────────────────────────────────────────────
 cat > data_sources/pleasanter.py << 'EOF'
 #!/usr/bin/env python3
-import os, sys
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
-
-import pandas as pd, psycopg2
+import os
+import pandas as pd
+import psycopg2
+import pytz
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
 
 load_dotenv()
+JST = pytz.timezone('Asia/Tokyo')
 
-def fetch_daily_entries(start_date=None, end_date=None):
+def fetch_daily_entries(start_date=None, end_date=None) -> pd.DataFrame:
     try:
         conn = psycopg2.connect(
             host=os.getenv('DB_HOST'),
@@ -142,18 +145,25 @@ def fetch_daily_entries(start_date=None, end_date=None):
         cur.execute(sql, params)
         rows = cur.fetchall()
     except Exception as e:
-        print(f"Error fetching DB entries: {e}")
+        print(f"[Error] fetching Pleasanter entries: {e}")
         return pd.DataFrame()
     finally:
         if 'conn' in locals():
             conn.close()
+
     df = pd.DataFrame(rows)
-    if not df.empty:
-        df['created_at'] = pd.to_datetime(df['UpdatedTime'], errors='coerce')
-        df['date'] = df['created_at'].dt.normalize()
-        df.rename(columns={'Body': 'content', 'Title': 'title'}, inplace=True)
+    if df.empty:
+        return df
+
+    df['created_at'] = pd.to_datetime(
+        df['UpdatedTime'], utc=True, errors='coerce'
+    ).dt.tz_convert(JST)
+    df['date'] = df['created_at'].dt.normalize()
+    df.rename(columns={'Body': 'content', 'Title': 'title'}, inplace=True)
     return df
 EOF
+chmod +x data_sources/pleasanter.py
+
 
 # 2-7. data_sources/stayfree_loader.py
 cat > data_sources/stayfree_loader.py << 'EOF'
@@ -290,6 +300,7 @@ def load_twitter_data() -> pd.DataFrame:
     return df[['date', 'content', 'title', 'created_at']].copy()
 
 
+
 EOF
 
 # 2-9. features/featurize.py
@@ -323,46 +334,126 @@ EOF
 # 2-10. models/predictor.py
 cat > models/predictor.py << 'EOF'
 #!/usr/bin/env python3
-import os, sys, pickle
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
+"""
+ニューラルネットによるヘルススコア回帰モデル
+"""
 
-import pandas as pd
-from sklearn.linear_model import LinearRegression
+import os, json, random, numpy as np, torch
+from pathlib import Path
+from sklearn.model_selection import train_test_split
+from torch import nn, optim
+from torchmetrics import MeanAbsoluteError
 
-from features.featurize import create_feature_set
+SEED = 42
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MODEL_PATH = Path("/myhealth/models/health_model.pt")
 
-MODEL_PATH = os.getenv('MODEL_DIR', './models') + '/health_model.pkl'
+# ── データ読み込み（例として CSV） ─────────────────────
+def load_feature_matrix():
+    """
+    返り値:
+        X: np.ndarray [n_samples, n_features]
+        y: np.ndarray [n_samples]
+    """
+    import pandas as pd
+    df = pd.read_csv("/myhealth/data/health_features.csv")
+    y = df["target"].values.astype(np.float32)
+    X = df.drop(columns=["target"]).values.astype(np.float32)
+    return X, y
 
-def train_model():
-    df = create_feature_set()
-    if df.empty:
-        print("No data available for training.")
+# ── MLP モデル ───────────────────────────────────────
+class MLP(nn.Module):
+    def __init__(self, in_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x).squeeze(1)
+
+# ── 学習関数 ───────────────────────────────────────
+def train_model(num_epochs: int = 300, batch_size: int = 64) -> None:
+    X, y = load_feature_matrix()
+    try:
+        X_tr, X_val, y_tr, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=SEED
+        )
+    except ValueError as e:
+        print(f"[WARN] train_test_split でエラー ({e}) → 学習をスキップします")
         return
-    X = df.index.values.reshape(-1, 1)
-    y = df['sentiment']
-    model = LinearRegression().fit(X, y)
-    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-    with open(MODEL_PATH, 'wb') as f:
-        pickle.dump(model, f)
-    print("Model trained and saved.")
 
-def predict():
-    if not os.path.isfile(MODEL_PATH):
-        train_model()
-    if not os.path.isfile(MODEL_PATH):
-        return pd.DataFrame()
-    with open(MODEL_PATH, 'rb') as f:
-        model = pickle.load(f)
-    df = create_feature_set()
-    if df.empty:
-        return df
-    X = df.index.values.reshape(-1, 1)
-    pred = model.predict(X)
-    df['pred_sentiment'] = pred
-    df['pred_energy'] = pred
-    df['energy_state'] = df['pred_energy'].apply(lambda x: 'Active' if x >= 0 else 'Low')
-    return df
+
+    tr_ds = torch.utils.data.TensorDataset(
+        torch.tensor(X_tr), torch.tensor(y_tr)
+    )
+    val_ds = torch.utils.data.TensorDataset(
+        torch.tensor(X_val), torch.tensor(y_val)
+    )
+    tr_loader = torch.utils.data.DataLoader(tr_ds, batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_ds, batch_size, shuffle=False)
+
+    model = MLP(in_dim=X.shape[1]).to(DEVICE)
+    opt   = optim.Adam(model.parameters(), lr=1e-3)
+    crit  = nn.MSELoss()
+    metric = MeanAbsoluteError().to(DEVICE)
+
+    best_loss, patience, PATIENCE = float("inf"), 0, 15
+
+    for epoch in range(1, num_epochs + 1):
+        # ---- train ----
+        model.train()
+        for xb, yb in tr_loader:
+            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+            opt.zero_grad()
+            pred = model(xb)
+            loss = crit(pred, yb)
+            loss.backward(); opt.step()
+
+        # ---- validate ----
+        model.eval(); metric.reset()
+        val_loss = 0.0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                pred = model(xb)
+                val_loss += crit(pred, yb).item() * xb.size(0)
+                metric.update(pred, yb)
+        val_loss /= len(val_loader.dataset)
+        mae = metric.compute().item()
+        print(f"[{epoch:03d}] val_loss={val_loss:.4f}  MAE={mae:.4f}")
+
+        # early stopping
+        if val_loss < best_loss:
+            best_loss, patience = val_loss, 0
+            torch.save(model.state_dict(), MODEL_PATH)
+        else:
+            patience += 1
+            if patience >= PATIENCE:
+                print("Early stopping.")
+                break
+
+    print(f"Best val_loss={best_loss:.4f}  → saved to {MODEL_PATH}")
+
+# ── 予測関数 ─────────────────────────────────────────
+_model_cache = None
+def predict(X: np.ndarray) -> np.ndarray:
+    global _model_cache
+    if _model_cache is None:
+        in_dim = X.shape[1]
+        model = MLP(in_dim); model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+        model.to(DEVICE).eval()
+        _model_cache = model
+    with torch.no_grad():
+        X_t = torch.tensor(X, dtype=torch.float32, device=DEVICE)
+        return _model_cache(X_t).cpu().numpy()
+
 EOF
 
 # 2-11. strategies/train.py
@@ -378,6 +469,235 @@ from models.predictor import train_model
 if __name__ == '__main__':
     train_model()
 EOF
+
+# 2-11. strategies/auto_generate_features.py
+cat > strategies/auto_generate_features.py << 'EOF'
+#!/usr/bin/env python3
+import os, sys, glob, json
+from datetime import datetime, timedelta, timezone
+
+# Directories for input data (from environment variables or defaults)
+TWITTER_DIR = os.getenv('TWITTER_DIR', './teacher_data/twitter_exports')
+STAYFREE_DIR = os.getenv('STAYFREE_DIR', './teacher_data/stayfree_exports')
+
+# Try to initialize a sentiment analysis pipeline (Japanese BERT model)
+sentiment_pipeline = None
+try:
+    from transformers import pipeline
+    sentiment_pipeline = pipeline(
+        "sentiment-analysis",
+        model="daigo/bert-base-japanese-sentiment"
+    )
+except Exception as e:
+    print(f"[WARNING] Could not load transformers model: {e}")
+    sentiment_pipeline = None
+
+# Define a simple fallback sentiment classifier (keyword-based) if pipeline is not available
+positive_keywords = ["嬉しい", "楽しい", "最高", "大好き", "最高", "感謝", "happy", "joy", "love"]
+negative_keywords = ["悲しい", "辛い", "苦しい", "嫌い", "最悪", "怒り", "死にたい", "疲れた", "angry", "sad"]
+
+def classify_sentiment(text: str) -> str:
+    """Classify sentiment of the given text as 'positive', 'negative', or 'neutral'."""
+    # Use the BERT sentiment pipeline if available
+    if sentiment_pipeline:
+        try:
+            result = sentiment_pipeline(text[:512])  # truncate to 512 tokens if very long
+            if result:
+                # Get the label and normalize to lowercase
+                label = result[0]['label'].lower()
+                if label in ["positive", "negative", "neutral"]:
+                    return label
+                # Some models might output labels in Japanese or different format; handle if needed
+                if label in ["ポジティブ", "ポジティブだね"]:  # just an example if Japanese output
+                    return "positive"
+                if label in ["ネガティブ", "ネガティブだね"]:
+                    return "negative"
+                # If label not recognized, fall through to keyword method
+        except Exception as e:
+            print(f"[WARNING] Sentiment pipeline failed on text: {e}")
+            # fallback to keyword method if pipeline fails for this text
+
+    # Fallback keyword-based sentiment detection:
+    text_lower = text.lower()
+    pos = any(word in text for word in positive_keywords)
+    neg = any(word in text for word in negative_keywords)
+    if pos and not neg:
+        return "positive"
+    if neg and not pos:
+        return "negative"
+    return "neutral"
+
+# Helper to convert epoch ms to local datetime
+JST = timezone(timedelta(hours=9))  # Japan Standard Time
+def to_jst_datetime(ms: int) -> datetime:
+    """Convert a timestamp in milliseconds to a timezone-aware datetime in JST."""
+    return datetime.fromtimestamp(ms/1000, tz=timezone.utc).astimezone(JST)
+
+# 1. Parse StayFree usage backup to get sleep duration per day
+sleep_hours_by_date = {}  # store estimated sleep hours for each date (string)
+base_target_by_date = {}  # store base target (60,70,80) for each date
+
+# Find usage backup file(s) in STAYFREE_DIR
+for filepath in glob.glob(os.path.join(STAYFREE_DIR, "*.usage_backup")):
+    try:
+        # Read the file as binary and extract JSON content (skipping any non-JSON header bytes)
+        with open(filepath, "rb") as bf:
+            data = bf.read()
+            # Find the first curly brace to locate JSON start
+            start_idx = data.find(b'{')
+            json_str = data[start_idx:].decode('utf-8')
+            usage_data = json.loads(json_str)
+    except Exception as e:
+        print(f"[ERROR] Could not parse StayFree backup file {filepath}: {e}")
+        continue
+
+    # The usage_data is expected to contain a 'stores' dict with 'sessions_2' list
+    sessions = usage_data.get("stores", {}).get("sessions_2", [])
+    # Split sessions by day boundaries and record usage intervals per day
+    usage_intervals_by_date = {}  # dict of date -> list of (start, end) datetimes in that date
+    for sess in sessions:
+        start_dt = to_jst_datetime(sess.get("startedAt"))
+        end_dt = to_jst_datetime(sess.get("endedAt"))
+        # Ensure start_dt <= end_dt
+        if end_dt < start_dt:
+            end_dt = start_dt
+        # If session spans multiple days, split at midnight of start_dt's day
+        start_date = start_dt.date()
+        end_date = end_dt.date()
+        if start_date == end_date:
+            usage_intervals_by_date.setdefault(str(start_date), []).append((start_dt, end_dt))
+        else:
+            # Session goes into the next day
+            # End of start_date at 23:59:59...
+            end_of_start_day = datetime(start_date.year, start_date.month, start_date.day, 23, 59, 59, tzinfo=JST)
+            usage_intervals_by_date.setdefault(str(start_date), []).append((start_dt, end_of_start_day))
+            # Beginning of next day at 00:00:00 to end_dt
+            usage_intervals_by_date.setdefault(str(end_date), []).append((datetime(end_date.year, end_date.month, end_date.day, 0, 0, 0, tzinfo=JST), end_dt))
+            # Note: Assuming sessions don't span more than 2 days continuously.
+
+    # Now compute longest gap (in hours) for each day
+    for date_str, intervals in usage_intervals_by_date.items():
+        # Sort intervals by start time
+        intervals.sort(key=lambda x: x[0])
+        day_start = datetime.fromisoformat(date_str).replace(tzinfo=JST)
+        day_end = (day_start + timedelta(days=1))
+        longest_gap = 0.0
+        prev_end = day_start  # start of day
+        for (s_dt, e_dt) in intervals:
+            # gap from prev_end to current start
+            gap = (s_dt - prev_end).total_seconds() / 3600.0
+            if gap > longest_gap:
+                longest_gap = gap
+            # move prev_end forward if this session ends later
+            if e_dt > prev_end:
+                prev_end = e_dt
+        # gap from last usage end to end of day
+        final_gap = (day_end - prev_end).total_seconds() / 3600.0
+        if final_gap > longest_gap:
+            longest_gap = final_gap
+
+        sleep_hours_by_date[date_str] = longest_gap
+        # Determine base target from sleep_hours
+        if longest_gap >= 7.0:
+            base_target_by_date[date_str] = 80
+        elif longest_gap < 6.0:
+            base_target_by_date[date_str] = 60
+        else:
+            base_target_by_date[date_str] = 70
+
+# 2. Parse Twitter tweets.js data to get tweets per day and sentiment
+tweets_by_date = {}   # dict of date_str -> list of (tweet_text, sentiment_label)
+# Find all tweets.js files in TWITTER_DIR (in case of multiple parts)
+for filepath in glob.glob(os.path.join(TWITTER_DIR, "**", "tweets*.js"), recursive=True):
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except Exception as e:
+        print(f"[ERROR] Could not read Twitter data file {filepath}: {e}")
+        continue
+    # Remove the JavaScript assignment part if present (e.g., "window.YTD.tweets.part0 = ")
+    json_start = raw.find('[')
+    json_end = raw.rfind(']')
+    if json_start == -1 or json_end == -1:
+        print(f"[WARNING] No JSON array found in {filepath}")
+        continue
+    tweets_json_str = raw[json_start:json_end+1]
+    try:
+        tweets = json.loads(tweets_json_str)
+    except Exception as e:
+        print(f"[ERROR] JSON parse failed for {filepath}: {e}")
+        continue
+
+    # Iterate through tweets
+    for entry in tweets:
+        tweet = entry.get("tweet", {})
+        text = tweet.get("full_text", "")
+        created_at = tweet.get("created_at")
+        if not created_at or text is None:
+            continue
+        # Parse created_at (e.g. "Tue Mar 18 08:07:10 +0000 2025") and convert to JST date
+        try:
+            dt = datetime.strptime(created_at, "%a %b %d %H:%M:%S %z %Y")
+        except Exception:
+            # If format unexpected, skip
+            continue
+        dt_jst = dt.astimezone(JST)
+        date_str = dt_jst.strftime("%Y-%m-%d")
+        # Classify sentiment of the tweet content
+        sentiment_label = classify_sentiment(text)
+        # Store result
+        tweets_by_date.setdefault(date_str, []).append((text, sentiment_label))
+
+# 3. Determine sentiment adjustment per day and prepare CSV rows
+rows = []
+for date_str, base_target in base_target_by_date.items():
+    # Determine overall day sentiment adjustment
+    adjust = 0
+    tweet_list = tweets_by_date.get(date_str, [])
+    if tweet_list:
+        # Count if any positive and any negative tweets on that day
+        any_positive = any(lbl == "positive" for (_, lbl) in tweet_list)
+        any_negative = any(lbl == "negative" for (_, lbl) in tweet_list)
+        if any_positive and not any_negative:
+            adjust = 5
+        elif any_negative and not any_positive:
+            adjust = -5
+        else:
+            adjust = 0
+    else:
+        # No tweets that day -> no sentiment adjustment
+        adjust = 0
+    final_target = base_target + adjust
+
+    # Add a row for the StayFree (sleep) data of that day
+    sleep_hours = sleep_hours_by_date.get(date_str, None)
+    if sleep_hours is not None:
+        # Format sleep hours to one decimal place
+        content = f"睡眠時間（推定）: {sleep_hours:.1f}時間"
+        rows.append((date_str, content, "stayfree", "neutral", final_target))
+    # Add rows for each tweet on that day
+    for (text, sent) in tweets_by_date.get(date_str, []):
+        rows.append((date_str, text, "twitter", sent, final_target))
+
+# 4. Write to CSV file
+output_path = "/myhealth/data/health_features.csv"
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+try:
+    with open(output_path, "w", encoding="utf-8") as csvfile:
+        # Write header
+        csvfile.write("date,content,source,sentiment,target\n")
+        for (date_str, content, source, sentiment, target) in rows:
+            # Escape quotes in content
+            content_escaped = content.replace('"', '""')
+            # Enclose content in quotes if it contains comma
+            if ',' in content_escaped or '\n' in content_escaped:
+                content_escaped = f'"{content_escaped}"'
+            csvfile.write(f"{date_str},{content_escaped},{source},{sentiment},{target}\n")
+    print(f"✅ Successfully generated CSV at {output_path}")
+except Exception as e:
+    print(f"[ERROR] Failed to write CSV: {e}")
+EOF
+
 
 # 2-12. strategies/predict.py
 cat > strategies/predict.py << 'EOF'
@@ -428,12 +748,12 @@ from plotly.subplots import make_subplots
 
 # ―― transformers で事前学習済み日本語 BERT を利用 ──────────────────
 from transformers import pipeline, Pipeline
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ── sys.path を最初に通す ───────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, '..')))
-from data_sources.twitter_loader import load_twitter_data  # 自作ローダー
-
+# ここから下で data_sources.* を import しても OK
+from data_sources.twitter_loader import load_twitter_data
+from data_sources.pleasanter import fetch_daily_entries
 # ── フォント（Noto Sans CJK）が入っている前提 ────────────
 JP_FONT = "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
 
@@ -463,10 +783,36 @@ def _clean_text(text: str) -> str:
     return text
 
 
-def _token_filter(token: str) -> bool:
-    """WordCloud 用 Stopwords 判定（True なら捨てる）"""
-    return token in EXTRA_STOP or ASCII_ID_RE.match(token)
+# ---------------------------------------------------------------------
+#  ストップワード定義ブロック  ★ここを丸ごと追加 / 置換してください
+# ---------------------------------------------------------------------
+from wordcloud import STOPWORDS   # 英語既定 STOPWORDS
 
+# ① URL・RT など既定で除外したい“英数字系”トークン
+DEFAULT_STOP = {
+    'https', 'http', 't', 'co', 'amp', 'rt'
+}
+
+# ② 追加ストップワードをファイルから読み込む（1 行 1 語）
+STOPWORD_FILE = os.getenv("STOPWORD_PATH", "/teacher_data/stopwords.txt")
+EXTRA_STOP: set[str] = set()
+if os.path.isfile(STOPWORD_FILE):
+    with open(STOPWORD_FILE, encoding="utf-8") as f:
+        EXTRA_STOP = {
+            ln.strip() for ln in f
+            if ln.strip() and not ln.startswith('#')
+        }
+
+# ③ すべて合体させた最終セット（英語既定 STOPWORDS も加える）
+STOP_SET = DEFAULT_STOP | EXTRA_STOP | set(STOPWORDS)
+
+# ④ STOP_SET の語が連続しただけのトークン（例: ｗｗｗ, あああ）も除外
+RE_STOP = re.compile(r'^(?:' + '|'.join(map(re.escape, STOP_SET)) + r')+$')
+
+def _token_filter(tok: str) -> bool:
+    """WordCloud で除外するトークン判定"""
+    return ASCII_ID_RE.match(tok) or tok in STOP_SET or RE_STOP.match(tok)
+# ---------------------------------------------------------------------
 
 def sanitize_records(df: pd.DataFrame):
     """DataTable 用に JSON 変換・NaN 空文字化"""
@@ -547,6 +893,26 @@ def classify_emotion(text: str) -> str:
 
 def main():
     df = load_twitter_data()
+    # ───────────────── Pleasanter データ ─────────────────
+    df_pl = fetch_daily_entries()
+    if not df_pl.empty and 'content' in df_pl.columns:
+        # JST → hour 抽出（twitter_loader と揃える）
+        df_pl['hour'] = df_pl['created_at'].dt.hour
+        pl_hour_stats = (df_pl.groupby('hour')
+                           .size()
+                           .reindex(range(24), fill_value=0)
+                           .reset_index(name='record_count'))
+
+        # ★ グラフ（時間帯別レコード数）
+        fig_pl_hour = px.bar(
+            pl_hour_stats, x='hour', y='record_count',
+            title='Pleasanter 時間帯別レコード数',
+            labels={'hour':'時間帯 (時)', 'record_count':'レコード数'},
+            color='record_count', color_continuous_scale='Blues'
+        )
+    else:
+        fig_pl_hour = None
+
     if df.empty or 'content' not in df.columns:
         print("No Twitter data.")
         return
@@ -599,6 +965,24 @@ def main():
     app.layout = html.Div(
         style={'padding': '20px'},
         children=[
+            # ------ Pleasanter セクション -----------------
+            html.H2("Pleasanter 時間帯別レコード数"),
+            dcc.Graph(figure=fig_pl_hour) if fig_pl_hour else html.P("※レコードなし"),
+
+            html.H2("Pleasanter レコード一覧"),
+            dash_table.DataTable(
+                columns=[{'name':'日時','id':'created_at'},
+                         {'name':'タイトル','id':'title'},
+                         {'name':'内容','id':'content'}],
+                data=sanitize_records(
+                    df_pl[['created_at','title','content']] if not df_pl.empty else pd.DataFrame()
+                ),
+                page_action='none',
+                style_table={'height':'500px','overflowY':'auto','overflowX':'auto'},
+                style_cell={'textAlign':'left','padding':'4px'},
+                style_header={'backgroundColor':'#f0f0f0','fontWeight':'bold'},
+                virtualization=True
+            ),
             html.H1("Health Dashboard"),
             html.H2("Twitterワードクラウド"),
             html.Img(src=wc_uri, style={'width': '100%', 'maxHeight': '400px'})
@@ -634,22 +1018,26 @@ def main():
 if __name__ == '__main__':
     main()
 
+
 EOF
 
-# 2-14. entrypoint.sh
-# entrypoint.sh を書き出し
+# 2-15. entrypoint.sh  (modify this section to run feature generation)
 cat > entrypoint.sh <<'EOF'
 #!/bin/sh
 set -e
 export MPLCONFIGDIR=/tmp/.matplotlib
 mkdir -p "$MPLCONFIGDIR"
 
+echo "▶ Generating training features..."
+python /myhealth/strategies/auto_generate_features.py || echo "⚠️ Feature generation failed"
+
 echo "▶ Running train.py..."
-python /myhealth/strategies/train.py
+python /myhealth/strategies/train.py                    # Proceed with model training
 
 echo "▶ Starting Dash..."
-exec python /myhealth/dashboard/app.py
+exec python /myhealth/dashboard/app.py                  # Launch the Dash web app
 EOF
+
 
 # CR(\r) を除去して実行権限を付与
 sed -i 's/\r$//' entrypoint.sh
@@ -706,7 +1094,7 @@ $(printf '      - %s\n' "${VOLUMES[@]}")
       - HF_HOME=/tmp/hfcache
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
-        - STOPWORD_PATH=/teacher_data/stopwords.txt
+      - STOPWORD_PATH=/teacher_data/stopwords.txt
     networks:
       - pleasanter-net
 

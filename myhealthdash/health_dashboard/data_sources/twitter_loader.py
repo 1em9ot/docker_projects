@@ -109,3 +109,4 @@ def load_twitter_data() -> pd.DataFrame:
     return df[['date', 'content', 'title', 'created_at']].copy()
 
 
+
