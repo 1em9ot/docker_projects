@@ -81,8 +81,13 @@ def load_twitter_data() -> pd.DataFrame:
             df[created_col], format=DT_FMT, errors='coerce', utc=True
         )
 
-        # ② JST (Asia/Tokyo) に変換
-        df['created_at'] = created_utc.dt.tz_convert('Asia/Tokyo')
+        # ② JST (Asia/Tokyo) に変換し、ミリ秒以下を落とす（秒単位に丸め）
+        df['created_at'] = (
+            created_utc
+            .dt.tz_convert('Asia/Tokyo')
+            .dt.floor('s')        # ミリ秒以下を切り捨て
+        )
+        
 
         # ③ 0 時切り捨てで date 列
         df['date'] = df['created_at'].dt.normalize()

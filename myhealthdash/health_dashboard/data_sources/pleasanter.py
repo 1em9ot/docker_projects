@@ -38,9 +38,12 @@ def fetch_daily_entries(start_date=None, end_date=None) -> pd.DataFrame:
     if df.empty:
         return df
 
-    df['created_at'] = pd.to_datetime(
-        df['UpdatedTime'], utc=True, errors='coerce'
-    ).dt.tz_convert(JST)
+    # UpdatedTime を UTC→JST に変換し、ミリ秒以下を切り捨て
+    df['created_at'] = (
+        pd.to_datetime(df['UpdatedTime'], utc=True, errors='coerce')
+          .dt.tz_convert(JST)
+          .dt.floor('s')        # ミリ秒以下を 00 に
+    )
     df['date'] = df['created_at'].dt.normalize()
     df.rename(columns={'Body': 'content', 'Title': 'title'}, inplace=True)
     return df
