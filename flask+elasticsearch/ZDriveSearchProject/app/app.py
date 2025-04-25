@@ -176,42 +176,49 @@ def search():
     if query:
         # Elasticsearchから全件の検索結果を取得（スクロール検索を使用）
         try:
-            res = requests.post(f"{ES_URL}/{INDEX_NAME}/_search",
-                                params={"scroll": "1m", "size": 1000},
-                                json={
-                                    "query": {
-                                        "multi_match": {
-                                            "query": query,
-                                            "fields": ["content", "filename", "path"]
-                                        }
-                                    },
-                                    "highlight": {
-                                        "fields": {
-                                            "content": {"fragment_size": 100, "number_of_fragments": 3},
-                                            "filename": {"fragment_size": 50, "number_of_fragments": 1}
-                                        }
-                                    }
-                                },
-                                timeout=10)
+            res = requests.post(
+                f"{ES_URL}/{INDEX_NAME}/_search",
+                params={"scroll": "1m", "size": 1000},
+                json={
+                    "query": {
+                        "multi_match": {
+                            "query": query,
+                            "fields": ["content", "filename", "path"]
+                        }
+                    },
+                    "highlight": {
+                        # 必要に応じて"encoder": "html"を追加可能
+                        "fields": {
+                            "content": {"fragment_size": 100, "number_of_fragments": 3},
+                            "filename": {"fragment_size": 50, "number_of_fragments": 1}
+                        }
+                    }
+                },
+                timeout=10
+            )
             res.raise_for_status()
             data = res.json()
             scroll_id = data.get("_scroll_id")
             hits = data.get("hits", {}).get("hits", [])
             results = []
             results.extend(hits)
+            # スクロールを使って全件取得
             while scroll_id and hits:
-                scroll_res = requests.post(f"{ES_URL}/_search/scroll",
-                                           json={"scroll": "1m", "scroll_id": scroll_id},
-                                           timeout=10)
+                scroll_res = requests.post(
+                    f"{ES_URL}/_search/scroll",
+                    json={"scroll": "1m", "scroll_id": scroll_id},
+                    timeout=10
+                )
                 scroll_res.raise_for_status()
                 data = scroll_res.json()
                 scroll_id = data.get("_scroll_id")
                 hits = data.get("hits", {}).get("hits", [])
                 results.extend(hits)
             total_hits = len(results)
-            # 検索結果の件数を表示
+            # スクロールIDをクリア
             if scroll_id:
                 requests.delete(f"{ES_URL}/_search/scroll", json={"scroll_id": [scroll_id]})
+            # 検索結果の件数を表示
             if total_hits == 0:
                 html_parts.append(f"<p>Found 0 result(s) for 『<strong>{escape(query)}</strong>』.</p>")
             else:
@@ -223,16 +230,17 @@ def search():
                     path = src["path"]
                     size = src["size"]
                     mod = src["modified"].split(".")[0].replace("T", " ")
+                    # ファイル情報のリストアイテム
                     html_parts.append(
                         f"<li><a href='/view?file={quote(path)}' target='_blank'><strong>{escape(src['filename'])}</strong></a> "
                         f"({size} bytes, {mod}) — Score {score:.2f}<br/><small>{escape(path)}</small>"
                     )
-                    # ハイライト表示
+                    # ハイライト表示（フィールド名・スニペット）
                     if "highlight" in h:
                         for fld, snippets in h["highlight"].items():
-                            html_parts.append(f"<div><em>{fld}:</em><ul>")
+                            html_parts.append(f"<div><em>{escape(fld)}:</em><ul>")
                             for s in snippets:
-                                html_parts.append(f"<li>{s}</li>")
+                                html_parts.append(f"<li>{escape(s)}</li>")
                             html_parts.append("</ul></div>")
                     html_parts.append("</li>")
                 html_parts.append("</ul>")
@@ -256,6 +264,7 @@ def search():
                     f"({size} bytes, {mod})<br/><small>{escape(path)}</small></li>"
                 )
             html_parts.append("</ul>")
+    # HTML閉じタグと連結してレスポンスを返す
     html_parts.append("</body></html>")
     return render_template_string("".join(html_parts))
 
