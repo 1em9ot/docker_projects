@@ -5,6 +5,7 @@ services:
     container_name: health_dashboard
     ports:
       - "8060:8060"
+    restart: unless-stopped    
     volumes:
       - /home/user/docker_projects/myhealthdash/teacher_data:/myhealth/teacher_data
       - /home/user/docker_projects/myhealthdash/health_dashboard/models:/myhealth/models

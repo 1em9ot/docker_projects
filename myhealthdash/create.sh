@@ -1093,6 +1093,7 @@ services:
     container_name: ${PROJECT_NAME}
     ports:
       - "8060:8060"
+    restart: unless-stopped    
     volumes:
 $(printf '      - %s\n' "${VOLUMES[@]}")
     user: "${HOST_UID}:${HOST_GID}"
